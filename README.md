@@ -2,7 +2,9 @@
 
 This is a fork of the NEAR example FT library.
 
-Additionally this contract has the ability to force transfer funds away from a user, and freeze funds.
+This is a standard FT contract that additionally:
+- Allows the owner to freeze/unfreeze accounts
+- Allows the owner to force transfer out of accounts
 
 ## How to Build Locally?
 
