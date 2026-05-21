@@ -25,7 +25,7 @@ use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
 use near_sdk::borsh::BorshSerialize;
-use near_sdk::collections::LazyOption;
+use near_sdk::collections::{LazyOption, LookupSet};
 use near_sdk::json_types::U128;
 use near_sdk::{
     env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue, assert_one_yocto,
@@ -37,6 +37,7 @@ pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
     owner_id: AccountId,
+    frozen_accounts: LookupSet<AccountId>,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -44,6 +45,7 @@ pub struct Contract {
 enum StorageKey {
     FungibleToken,
     Metadata,
+    FrozenAccounts,
 }
 
 #[near]
@@ -58,6 +60,7 @@ impl Contract {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
             owner_id: owner_id.clone(),
+            frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
         };
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -70,6 +73,20 @@ impl Contract {
         .emit();
 
         this
+    }
+
+    pub fn freeze_account(&mut self, account_id: AccountId) {
+        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can freeze accounts");
+        self.frozen_accounts.insert(&account_id);
+    }
+
+    pub fn unfreeze_account(&mut self, account_id: AccountId) {
+        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can unfreeze accounts");
+        self.frozen_accounts.remove(&account_id);
+    }
+
+    pub fn is_frozen(&self, account_id: AccountId) -> bool {
+        self.frozen_accounts.contains(&account_id)
     }
 
     #[payable]
@@ -85,6 +102,9 @@ impl Contract {
 impl FungibleTokenCore for Contract {
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
+        let sender_id = env::predecessor_account_id();
+        require!(!self.frozen_accounts.contains(&sender_id), "Sender account is frozen");
+        require!(!self.frozen_accounts.contains(&receiver_id), "Receiver account is frozen");
         self.token.ft_transfer(receiver_id, amount, memo)
     }
 
@@ -96,6 +116,9 @@ impl FungibleTokenCore for Contract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        let sender_id = env::predecessor_account_id();
+        require!(!self.frozen_accounts.contains(&sender_id), "Sender account is frozen");
+        require!(!self.frozen_accounts.contains(&receiver_id), "Receiver account is frozen");
         self.token.ft_transfer_call(receiver_id, amount, memo, msg)
     }
 
