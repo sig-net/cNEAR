@@ -28,7 +28,7 @@ use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
 use near_sdk::{
-    env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
+    env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue, assert_one_yocto,
 };
 
 #[derive(PanicOnDefault)]
@@ -36,6 +36,7 @@ use near_sdk::{
 pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
+    owner_id: AccountId,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -56,6 +57,7 @@ impl Contract {
         let mut this = Self {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
+            owner_id: owner_id.clone(),
         };
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -68,6 +70,14 @@ impl Contract {
         .emit();
 
         this
+    }
+
+    #[payable]
+    pub fn force_ft_transfer(&mut self, sender_id: AccountId, receiver_id: AccountId, amount: U128, memo: Option<String>) {
+        assert_one_yocto();
+        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can call force_ft_transfer");
+        let amount: u128 = amount.into();
+        self.token.internal_transfer(&sender_id, &receiver_id, amount, memo);
     }
 }
 
