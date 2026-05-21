@@ -1,13 +1,8 @@
 # Fungible Token (FT)
 
-[![](https://img.shields.io/badge/⋈%20Examples-Basics-green)](https://docs.near.org/tutorials/welcome)
-[![](https://img.shields.io/badge/Contract-Rust-red)](contract-rs)
+This is a fork of the NEAR example FT library.
 
-This repository contains an example implementation of a [fungible token](https://docs.near.org/primitives/ft/standard) contract in Rust which uses [near-contract-standards] and [sandobox testing](https://docs.near.org/smart-contracts/testing/integration-test).
-
-[near-contract-standards]: https://github.com/near/near-sdk-rs/tree/master/near-contract-standards
-
-<br />
+Additionally this contract has the ability to force transfer funds away from a user, and freeze funds.
 
 ## How to Build Locally?
 
