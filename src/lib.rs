@@ -29,7 +29,8 @@ use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupSet;
 use near_sdk::{
-    env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue, assert_one_yocto,
+    assert_one_yocto, env, log, near, require, AccountId, BorshStorageKey, NearToken,
+    PanicOnDefault, PromiseOrValue,
 };
 
 #[derive(PanicOnDefault)]
@@ -77,13 +78,18 @@ impl Contract {
     }
 
     pub fn freeze_account(&mut self, account_id: AccountId) {
-        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can freeze accounts");
-        self.frozen_accounts.insert(&account_id);
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can freeze accounts"
+        );
         self.frozen_accounts.insert(account_id);
     }
 
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
-        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can unfreeze accounts");
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can unfreeze accounts"
+        );
         self.frozen_accounts.remove(&account_id);
     }
 
@@ -92,11 +98,21 @@ impl Contract {
     }
 
     #[payable]
-    pub fn force_ft_transfer(&mut self, sender_id: AccountId, receiver_id: AccountId, amount: U128, memo: Option<String>) {
+    pub fn force_ft_transfer(
+        &mut self,
+        sender_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) {
         assert_one_yocto();
-        require!(env::predecessor_account_id() == self.owner_id, "Only the owner can call force_ft_transfer");
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can call force_ft_transfer"
+        );
         let amount: u128 = amount.into();
-        self.token.internal_transfer(&sender_id, &receiver_id, amount, memo);
+        self.token
+            .internal_transfer(&sender_id, &receiver_id, amount, memo);
     }
 }
 
@@ -105,8 +121,14 @@ impl FungibleTokenCore for Contract {
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
         let sender_id = env::predecessor_account_id();
-        require!(!self.frozen_accounts.contains(&sender_id), "Sender account is frozen");
-        require!(!self.frozen_accounts.contains(&receiver_id), "Receiver account is frozen");
+        require!(
+            !self.frozen_accounts.contains(&sender_id),
+            "Sender account is frozen"
+        );
+        require!(
+            !self.frozen_accounts.contains(&receiver_id),
+            "Receiver account is frozen"
+        );
         self.token.ft_transfer(receiver_id, amount, memo)
     }
 
@@ -119,8 +141,14 @@ impl FungibleTokenCore for Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         let sender_id = env::predecessor_account_id();
-        require!(!self.frozen_accounts.contains(&sender_id), "Sender account is frozen");
-        require!(!self.frozen_accounts.contains(&receiver_id), "Receiver account is frozen");
+        require!(
+            !self.frozen_accounts.contains(&sender_id),
+            "Sender account is frozen"
+        );
+        require!(
+            !self.frozen_accounts.contains(&receiver_id),
+            "Receiver account is frozen"
+        );
         self.token.ft_transfer_call(receiver_id, amount, memo, msg)
     }
 
@@ -852,7 +880,11 @@ mod tests {
         contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
-    fn register_user(contract: &mut Contract, context: &mut VMContextBuilder, account_id: AccountId) {
+    fn register_user(
+        contract: &mut Contract,
+        context: &mut VMContextBuilder,
+        account_id: AccountId,
+    ) {
         testing_env!(context
             .predecessor_account_id(account_id.clone())
             .attached_deposit(contract.storage_balance_bounds().min)
@@ -873,7 +905,10 @@ mod tests {
         let transfer_amount = TOTAL_SUPPLY / 10;
         contract.force_ft_transfer(owner(), user1(), transfer_amount.into(), None);
 
-        assert_eq!(contract.ft_balance_of(owner()).0, TOTAL_SUPPLY - transfer_amount);
+        assert_eq!(
+            contract.ft_balance_of(owner()).0,
+            TOTAL_SUPPLY - transfer_amount
+        );
         assert_eq!(contract.ft_balance_of(user1()).0, transfer_amount);
     }
 
