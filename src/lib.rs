@@ -25,8 +25,9 @@ use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
 use near_sdk::borsh::BorshSerialize;
-use near_sdk::collections::{LazyOption, LookupSet};
+use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
+use near_sdk::store::LookupSet;
 use near_sdk::{
     env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue, assert_one_yocto,
 };
@@ -78,6 +79,7 @@ impl Contract {
     pub fn freeze_account(&mut self, account_id: AccountId) {
         require!(env::predecessor_account_id() == self.owner_id, "Only the owner can freeze accounts");
         self.frozen_accounts.insert(&account_id);
+        self.frozen_accounts.insert(account_id);
     }
 
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
