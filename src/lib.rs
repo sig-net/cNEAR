@@ -27,8 +27,10 @@ use near_contract_standards::storage_management::{
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
+use near_sdk::store::LookupSet;
 use near_sdk::{
-    env, log, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault, PromiseOrValue,
+    assert_one_yocto, env, log, near, require, AccountId, BorshStorageKey, NearToken,
+    PanicOnDefault, PromiseOrValue,
 };
 
 #[derive(PanicOnDefault)]
@@ -36,6 +38,8 @@ use near_sdk::{
 pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
+    owner_id: AccountId,
+    frozen_accounts: LookupSet<AccountId>,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -43,6 +47,7 @@ pub struct Contract {
 enum StorageKey {
     FungibleToken,
     Metadata,
+    FrozenAccounts,
 }
 
 #[near]
@@ -56,6 +61,8 @@ impl Contract {
         let mut this = Self {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
+            owner_id: owner_id.clone(),
+            frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
         };
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -69,12 +76,59 @@ impl Contract {
 
         this
     }
+
+    pub fn freeze_account(&mut self, account_id: AccountId) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can freeze accounts"
+        );
+        self.frozen_accounts.insert(account_id);
+    }
+
+    pub fn unfreeze_account(&mut self, account_id: AccountId) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can unfreeze accounts"
+        );
+        self.frozen_accounts.remove(&account_id);
+    }
+
+    pub fn is_frozen(&self, account_id: AccountId) -> bool {
+        self.frozen_accounts.contains(&account_id)
+    }
+
+    #[payable]
+    pub fn force_ft_transfer(
+        &mut self,
+        sender_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only the owner can call force_ft_transfer"
+        );
+        let amount: u128 = amount.into();
+        self.token
+            .internal_transfer(&sender_id, &receiver_id, amount, memo);
+    }
 }
 
 #[near]
 impl FungibleTokenCore for Contract {
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
+        let sender_id = env::predecessor_account_id();
+        require!(
+            !self.frozen_accounts.contains(&sender_id),
+            "Sender account is frozen"
+        );
+        require!(
+            !self.frozen_accounts.contains(&receiver_id),
+            "Receiver account is frozen"
+        );
         self.token.ft_transfer(receiver_id, amount, memo)
     }
 
@@ -86,6 +140,15 @@ impl FungibleTokenCore for Contract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        let sender_id = env::predecessor_account_id();
+        require!(
+            !self.frozen_accounts.contains(&sender_id),
+            "Sender account is frozen"
+        );
+        require!(
+            !self.frozen_accounts.contains(&receiver_id),
+            "Receiver account is frozen"
+        );
         self.token.ft_transfer_call(receiver_id, amount, memo, msg)
     }
 
@@ -815,5 +878,188 @@ mod tests {
         let transfer_amount = TOTAL_SUPPLY / 10;
 
         contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+    }
+
+    fn register_user(
+        contract: &mut Contract,
+        context: &mut VMContextBuilder,
+        account_id: AccountId,
+    ) {
+        testing_env!(context
+            .predecessor_account_id(account_id.clone())
+            .attached_deposit(contract.storage_balance_bounds().min)
+            .build());
+        contract.storage_deposit(None, None);
+    }
+
+    #[test]
+    fn test_force_transfer() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+        register_user(&mut contract, &mut context, user2());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let transfer_amount = TOTAL_SUPPLY / 10;
+        contract.force_ft_transfer(owner(), user1(), transfer_amount.into(), None);
+
+        assert_eq!(
+            contract.ft_balance_of(owner()).0,
+            TOTAL_SUPPLY - transfer_amount
+        );
+        assert_eq!(contract.ft_balance_of(user1()).0, transfer_amount);
+    }
+
+    #[test]
+    fn test_force_transfer_between_non_owner_accounts() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+        register_user(&mut contract, &mut context, user2());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let transfer_amount = TOTAL_SUPPLY / 10;
+        contract.force_ft_transfer(owner(), user1(), transfer_amount.into(), None);
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(user1(), user2(), transfer_amount.into(), None);
+
+        assert_eq!(contract.ft_balance_of(user1()).0, 0);
+        assert_eq!(contract.ft_balance_of(user2()).0, transfer_amount);
+    }
+
+    #[should_panic(expected = "Only the owner can call force_ft_transfer")]
+    #[test]
+    fn test_force_transfer_panics_for_non_owner() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_force_transfer_panics_on_zero_deposit() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(0))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+    }
+
+    #[test]
+    fn test_freeze_account() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        assert!(contract.is_frozen(user1()));
+        assert!(!contract.is_frozen(user2()));
+    }
+
+    #[test]
+    fn test_unfreeze_account() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+        assert!(contract.is_frozen(user1()));
+
+        contract.unfreeze_account(user1());
+        assert!(!contract.is_frozen(user1()));
+    }
+
+    #[should_panic(expected = "Only the owner can freeze accounts")]
+    #[test]
+    fn test_freeze_panics_for_non_owner() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(user1()).build());
+        contract.freeze_account(user2());
+    }
+
+    #[should_panic(expected = "Only the owner can unfreeze accounts")]
+    #[test]
+    fn test_unfreeze_panics_for_non_owner() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        testing_env!(context.predecessor_account_id(user2()).build());
+        contract.unfreeze_account(user1());
+    }
+
+    #[should_panic(expected = "Sender account is frozen")]
+    #[test]
+    fn test_transfer_panics_when_sender_frozen() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+        register_user(&mut contract, &mut context, user2());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.ft_transfer(user2(), (TOTAL_SUPPLY / 10).into(), None);
+    }
+
+    #[should_panic(expected = "Receiver account is frozen")]
+    #[test]
+    fn test_transfer_panics_when_receiver_frozen() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.ft_transfer(user1(), (TOTAL_SUPPLY / 10).into(), None);
+    }
+
+    #[test]
+    fn test_transfer_succeeds_after_unfreeze() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+        contract.unfreeze_account(user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let transfer_amount = TOTAL_SUPPLY / 10;
+        contract.ft_transfer(user1(), transfer_amount.into(), None);
+
+        assert_eq!(contract.ft_balance_of(user1()).0, transfer_amount);
     }
 }
