@@ -24,6 +24,7 @@ use near_contract_standards::fungible_token::{
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
+use near_plugins::{only, Ownable};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
@@ -33,12 +34,11 @@ use near_sdk::{
     PanicOnDefault, PromiseOrValue,
 };
 
-#[derive(PanicOnDefault)]
+#[derive(PanicOnDefault, Ownable)]
 #[near(contract_state)]
 pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
-    owner_id: AccountId,
     frozen_accounts: LookupSet<AccountId>,
 }
 
@@ -61,9 +61,9 @@ impl Contract {
         let mut this = Self {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
-            owner_id: owner_id.clone(),
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
         };
+        this.owner_set(Some(owner_id.clone()));
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
 
@@ -77,19 +77,13 @@ impl Contract {
         this
     }
 
+    #[only(owner)]
     pub fn freeze_account(&mut self, account_id: AccountId) {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only the owner can freeze accounts"
-        );
         self.frozen_accounts.insert(account_id);
     }
 
+    #[only(owner)]
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only the owner can unfreeze accounts"
-        );
         self.frozen_accounts.remove(&account_id);
     }
 
@@ -98,6 +92,7 @@ impl Contract {
     }
 
     #[payable]
+    #[only(owner)]
     pub fn force_ft_transfer(
         &mut self,
         sender_id: AccountId,
@@ -106,10 +101,6 @@ impl Contract {
         memo: Option<String>,
     ) {
         assert_one_yocto();
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only the owner can call force_ft_transfer"
-        );
         let amount: u128 = amount.into();
         self.token
             .internal_transfer(&sender_id, &receiver_id, amount, memo);
@@ -254,6 +245,10 @@ mod tests {
         let mut context = VMContextBuilder::new();
         const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 288 288'%3E%3Cg id='l' data-name='l'%3E%3Cpath d='M187.58,79.81l-30.1,44.69a3.2,3.2,0,0,0,4.75,4.2L191.86,103a1.2,1.2,0,0,1,2,.91v80.46a1.2,1.2,0,0,1-2.12.77L102.18,77.93A15.35,15.35,0,0,0,90.47,72.5H87.34A15.34,15.34,0,0,0,72,87.84V201.16A15.34,15.34,0,0,0,87.34,216.5h0a15.35,15.35,0,0,0,13.08-7.31l30.1-44.69a3.2,3.2,0,0,0-4.75-4.2L96.14,186a1.2,1.2,0,0,1-2-.91V104.61a1.2,1.2,0,0,1,2.12-.77l89.55,107.23a15.35,15.35,0,0,0,11.71,5.43h3.13A15.34,15.34,0,0,0,216,201.16V87.84A15.34,15.34,0,0,0,200.66,72.5h0A15.35,15.35,0,0,0,187.58,79.81Z'/%3E%3C/g%3E%3C/svg%3E";
 
+        context.current_account_id(current());
+        context.predecessor_account_id(current());
+        testing_env!(context.build());
+
         let contract = Contract::new(
             owner(),
             TOTAL_SUPPLY.into(),
@@ -269,7 +264,6 @@ mod tests {
         );
 
         context.storage_usage(env::storage_usage());
-        context.current_account_id(current());
 
         testing_env!(context.build());
 
@@ -935,7 +929,7 @@ mod tests {
         assert_eq!(contract.ft_balance_of(user2()).0, transfer_amount);
     }
 
-    #[should_panic(expected = "Only the owner can call force_ft_transfer")]
+    #[should_panic(expected = "Ownable: Method must be called from owner")]
     #[test]
     fn test_force_transfer_panics_for_non_owner() {
         let (mut contract, mut context) = setup();
@@ -984,7 +978,7 @@ mod tests {
         assert!(!contract.is_frozen(user1()));
     }
 
-    #[should_panic(expected = "Only the owner can freeze accounts")]
+    #[should_panic(expected = "Ownable: Method must be called from owner")]
     #[test]
     fn test_freeze_panics_for_non_owner() {
         let (mut contract, mut context) = setup();
@@ -993,7 +987,7 @@ mod tests {
         contract.freeze_account(user2());
     }
 
-    #[should_panic(expected = "Only the owner can unfreeze accounts")]
+    #[should_panic(expected = "Ownable: Method must be called from owner")]
     #[test]
     fn test_unfreeze_panics_for_non_owner() {
         let (mut contract, mut context) = setup();
