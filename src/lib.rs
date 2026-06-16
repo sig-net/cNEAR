@@ -31,7 +31,7 @@ use near_sdk::json_types::U128;
 use near_sdk::store::LookupSet;
 use near_sdk::{
     assert_one_yocto, env, log, near, require, AccountId, BorshStorageKey, NearToken,
-    PanicOnDefault, PromiseOrValue,
+    PanicOnDefault, Promise, PromiseOrValue,
 };
 
 #[derive(PanicOnDefault, Ownable)]
@@ -104,6 +104,15 @@ impl Contract {
         let amount: u128 = amount.into();
         self.token
             .internal_transfer(&sender_id, &receiver_id, amount, memo);
+    }
+
+    /// Deploys new contract code to this account, replacing the current code.
+
+    /// This keeps the existing contract state as-is.
+    #[only(owner)]
+    pub fn upgrade(&self) -> Promise {
+        let code = env::input().expect("no code provided").to_vec();
+        Promise::new(env::current_account_id()).deploy_contract(code)
     }
 }
 
