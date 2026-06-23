@@ -31,7 +31,7 @@ use near_sdk::json_types::U128;
 use near_sdk::store::{LookupSet, IterableSet};
 use near_sdk::{
     assert_one_yocto, env, log, near, require, AccountId, BorshStorageKey, NearToken,
-    PanicOnDefault, PromiseOrValue,
+    PanicOnDefault, Promise, PromiseOrValue,
 };
 
 #[derive(PanicOnDefault, Ownable)]
@@ -109,6 +109,14 @@ impl Contract {
 
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// Upgrade contract code. Callable only by owner (multisig or controller).
+    /// Can be transferred to controller contract for staged upgrades.
+    #[only(owner)]
+    pub fn upgrade(&self) -> Promise {
+        let code = env::input().expect("no code provided").to_vec();
+        Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
     #[only(owner)]
