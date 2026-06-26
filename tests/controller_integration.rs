@@ -429,18 +429,39 @@ async fn test_controller_delegates_token_control() -> Result<(), Box<dyn std::er
     );
     println!("✓ delegate_execution works - account frozen via controller");
 
-    // Test 4: Controller can trigger token upgrade
-    println!("\nTest upgrade capability...");
-    // upgrade() expects wasm bytes via env::input()
-    // For test, just verify controller (as owner) can call it
-    // Real upgrade would need: controller.stage_code() → controller.deploy_staged() → calls token.upgrade()
-    println!("✓ Token upgrade() method callable by controller (owner)");
-    println!("✓ Production flow: controller stages wasm → deploys to token via upgrade()");
+    // Test 4: Controller triggers token upgrade via delegate_execution
+    println!("\nTest upgrade via controller...");
+    
+    // Load actual token wasm for upgrade test
+    let token_wasm = get_wasm_path("fungible_token")?;
+    
+    // Call upgrade via delegate_execution
+    // upgrade() takes wasm via env::input() (no JSON args, raw bytes)
+    let upgrade_args_b64: near_sdk::json_types::Base64VecU8 = token_wasm.into();
+    
+    let upgrade_result = owner
+        .call(controller.id(), "delegate_execution")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "receiver_id": token_id.to_string(),
+            "actions": vec![json!({
+                "function_name": "upgrade",
+                "arguments": upgrade_args_b64,
+                "amount": "0",
+                "gas": "200000000000000"
+            })]
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    
+    assert!(upgrade_result.is_success(), "Upgrade should succeed");
+    println!("✓ Controller successfully upgraded token via delegate_execution");
 
     println!("\n✅ All controller delegation methods work:");
     println!("   1. delegate_pause → token.pause_contract() → paused");
     println!("   2. delegate_execution → token.freeze_account() → frozen");
-    println!("   3. controller owns token → can call upgrade()");
+    println!("   3. delegate_execution → token.upgrade() → upgraded");
 
     Ok(())
 }
