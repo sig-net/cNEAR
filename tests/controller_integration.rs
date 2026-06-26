@@ -1,5 +1,5 @@
-use near_workspaces::types::NearToken;
 use near_sdk::serde_json::json;
+use near_workspaces::types::NearToken;
 
 async fn deploy_token(
     owner: &near_workspaces::Account,
@@ -10,7 +10,7 @@ async fn deploy_token(
         .initial_balance(NearToken::from_near(10))
         .transact()
         .await?;
-    
+
     let token_account = token_exec.result;
     let token_deploy = token_account.deploy(&token_wasm).await?;
     let token = token_deploy.result;
@@ -243,7 +243,10 @@ async fn test_freeze_prevents_transfers() -> Result<(), Box<dyn std::error::Erro
         .transact()
         .await?;
 
-    assert!(xfer.is_success(), "Unfrozen account transfer should succeed");
+    assert!(
+        xfer.is_success(),
+        "Unfrozen account transfer should succeed"
+    );
 
     println!("✓ Freeze preventing transfers works");
 

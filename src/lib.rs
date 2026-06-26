@@ -64,7 +64,7 @@ impl Contract {
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
             paused: false,
         };
-        
+
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
 
@@ -1204,5 +1204,4 @@ mod tests {
             .build());
         contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
     }
-
 }
