@@ -24,6 +24,7 @@ use near_contract_standards::fungible_token::{
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
+use near_plugins::{access_control_any, AccessControlRole, AccessControllable, access_control};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
@@ -33,14 +34,21 @@ use near_sdk::{
     PanicOnDefault, Promise, PromiseOrValue,
 };
 
+#[derive(AccessControlRole, Clone, Copy)]
+#[near(serializers = [json])]
+enum Role {
+    Owner,
+}
+
 #[derive(PanicOnDefault)]
+#[access_control(role_type(Role))]
 #[near(contract_state)]
 pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
     frozen_accounts: LookupSet<AccountId>,
     paused: bool,
-    owner: Option<AccountId>,
+    owner_id: AccountId,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -64,8 +72,11 @@ impl Contract {
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
             paused: false,
-            owner: Some(owner_id.clone()),
+            owner_id: owner_id.clone(),
         };
+
+        // Grant Owner role to owner_id
+        this.grant_owner_role(&owner_id);
 
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -80,24 +91,19 @@ impl Contract {
         this
     }
 
+    #[access_control_any(roles(Role::Owner))]
     pub fn pause(&mut self) {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can pause"
-        );
         self.paused = true;
     }
 
     /// Alias for pause() - matches Aurora Controller expected method name
+    #[access_control_any(roles(Role::Owner))]
     pub fn pause_contract(&mut self) {
         self.pause();
     }
 
+    #[access_control_any(roles(Role::Owner))]
     pub fn unpause(&mut self) {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can unpause"
-        );
         self.paused = false;
     }
 
@@ -105,42 +111,20 @@ impl Contract {
         self.paused
     }
 
-    pub fn owner_transfer(&mut self, new_owner: AccountId) {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can transfer ownership"
-        );
-        self.owner = Some(new_owner);
-    }
-
-    pub fn get_owner(&self) -> Option<AccountId> {
-        self.owner.clone()
-    }
-
-    /// Upgrade contract code. Callable only by owner (multisig or controller).
-    /// Can be transferred to controller contract for staged upgrades.
+    /// Upgrade contract code - owner only
+    #[access_control_any(roles(Role::Owner))]
     pub fn upgrade(&self) -> Promise {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can upgrade"
-        );
         let code = env::input().expect("no code provided").to_vec();
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
-
+    
+    #[access_control_any(roles(Role::Owner))]
     pub fn freeze_account(&mut self, account_id: AccountId) {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can freeze"
-        );
         self.frozen_accounts.insert(account_id);
     }
 
+    #[access_control_any(roles(Role::Owner))]
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
-        require!(
-            self.owner.as_ref() == Some(&env::predecessor_account_id()),
-            "Only owner can unfreeze"
-        );
         self.frozen_accounts.remove(&account_id);
     }
 
@@ -148,7 +132,28 @@ impl Contract {
         self.frozen_accounts.contains(&account_id)
     }
 
+    pub fn owner_get(&self) -> AccountId {
+        self.owner_id.clone()
+    }
+
+    #[access_control_any(roles(Role::Owner))]
+    pub fn owner_set(&mut self, new_owner: AccountId) {
+        let old_owner = self.owner_id.clone();
+        self.owner_id = new_owner.clone();
+        // Transfer role to new owner
+        self.acl_revoke_role(Role::Owner.into(), old_owner);
+        self.grant_owner_role(&new_owner);
+    }
+
+    fn grant_owner_role(&mut self, owner: &AccountId) {
+        let mut acl = self.acl_get_or_init();
+        acl.add_super_admin_unchecked(owner);
+        acl.add_admin_unchecked(Role::Owner, owner);
+        acl.grant_role_unchecked(Role::Owner, owner);
+    }
+
     #[payable]
+    #[access_control_any(roles(Role::Owner))]
     pub fn force_ft_transfer(
         &mut self,
         sender_id: AccountId,
