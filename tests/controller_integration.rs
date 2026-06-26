@@ -429,39 +429,87 @@ async fn test_controller_delegates_token_control() -> Result<(), Box<dyn std::er
     );
     println!("✓ delegate_execution works - account frozen via controller");
 
-    // Test 4: Controller triggers token upgrade via delegate_execution
-    println!("\nTest upgrade via controller...");
-    
-    // Load actual token wasm for upgrade test
+    // Test 4: Controller upgrades token via proper release flow
+    println!("\nTest upgrade via controller release mechanism...");
+
+    // Load token wasm
     let token_wasm = get_wasm_path("fungible_token")?;
-    
-    // Call upgrade via delegate_execution
-    // upgrade() takes wasm via env::input() (no JSON args, raw bytes)
-    let upgrade_args_b64: near_sdk::json_types::Base64VecU8 = token_wasm.into();
-    
-    let upgrade_result = owner
-        .call(controller.id(), "delegate_execution")
+
+    // Calculate sha256 hash for release info
+    let hash_bytes = near_sdk::env::sha256(&token_wasm);
+    let hash = hash_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
+    // Step 1: Add release info for current token version
+    let result = owner
+        .call(controller.id(), "add_release_info")
         .deposit(NearToken::from_yoctonear(1))
         .args_json(json!({
-            "receiver_id": token_id.to_string(),
-            "actions": vec![json!({
-                "function_name": "upgrade",
-                "arguments": upgrade_args_b64,
-                "amount": "0",
-                "gas": "200000000000000"
-            })]
+            "hash": &hash,
+            "version": "1.0.0",
+            "is_latest": true,
+            "downgrade_hash": null,
+            "description": "Token contract"
+        }))
+        .transact()
+        .await?;
+    assert!(result.is_success(), "add_release_info should succeed");
+
+    // Step 2: Add release blob (wasm bytes)
+    let result = owner
+        .call(controller.id(), "add_release_blob")
+        .deposit(NearToken::from_yoctonear(1))
+        .args(token_wasm)
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(result.is_success(), "add_release_blob should succeed");
+
+    // Step 3: Register existing token deployment w/ controller
+    let deployment_info = json!({
+        "hash": &hash,
+        "version": "1.0.0",
+        "deployment_time": 0u64,
+        "upgrade_times": {},
+        "init_args": ""
+    });
+
+    let result = owner
+        .call(controller.id(), "add_deployment_info")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "contract_id": token_id.to_string(),
+            "deployment_info": deployment_info
+        }))
+        .transact()
+        .await?;
+    assert!(result.is_success(), "add_deployment_info should succeed");
+
+    // Step 4: Upgrade token (use unrestricted_upgrade since same hash)
+    let result = owner
+        .call(controller.id(), "unrestricted_upgrade")
+        .deposit(NearToken::from_yoctonear(1))
+        .args_json(json!({
+            "contract_id": token_id.to_string(),
+            "hash": &hash
         }))
         .max_gas()
         .transact()
         .await?;
-    
-    assert!(upgrade_result.is_success(), "Upgrade should succeed");
-    println!("✓ Controller successfully upgraded token via delegate_execution");
+
+    if !result.is_success() {
+        eprintln!("unrestricted_upgrade failed: {result:#?}");
+    }
+    assert!(result.is_success(), "unrestricted_upgrade should succeed");
+
+    println!("✓ Controller successfully upgraded token via release mechanism");
 
     println!("\n✅ All controller delegation methods work:");
     println!("   1. delegate_pause → token.pause_contract() → paused");
     println!("   2. delegate_execution → token.freeze_account() → frozen");
-    println!("   3. delegate_execution → token.upgrade() → upgraded");
+    println!("   3. add_release_info + add_release_blob + upgrade → token upgraded");
 
     Ok(())
 }
