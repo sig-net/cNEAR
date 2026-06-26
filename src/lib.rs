@@ -88,6 +88,11 @@ impl Contract {
         self.paused = true;
     }
 
+    /// Alias for pause() - matches Aurora Controller expected method name
+    pub fn pause_contract(&mut self) {
+        self.pause();
+    }
+
     pub fn unpause(&mut self) {
         require!(
             self.owner.as_ref() == Some(&env::predecessor_account_id()),
