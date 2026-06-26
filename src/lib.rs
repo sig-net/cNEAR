@@ -40,6 +40,7 @@ pub struct Contract {
     metadata: LazyOption<FungibleTokenMetadata>,
     frozen_accounts: LookupSet<AccountId>,
     paused: bool,
+    owner: Option<AccountId>,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -63,6 +64,7 @@ impl Contract {
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
             paused: false,
+            owner: Some(owner_id.clone()),
         };
 
         this.token.internal_register_account(&owner_id);
@@ -79,10 +81,18 @@ impl Contract {
     }
 
     pub fn pause(&mut self) {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can pause"
+        );
         self.paused = true;
     }
 
     pub fn unpause(&mut self) {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can unpause"
+        );
         self.paused = false;
     }
 
@@ -90,18 +100,42 @@ impl Contract {
         self.paused
     }
 
+    pub fn owner_transfer(&mut self, new_owner: AccountId) {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can transfer ownership"
+        );
+        self.owner = Some(new_owner);
+    }
+
+    pub fn get_owner(&self) -> Option<AccountId> {
+        self.owner.clone()
+    }
+
     /// Upgrade contract code. Callable only by owner (multisig or controller).
     /// Can be transferred to controller contract for staged upgrades.
     pub fn upgrade(&self) -> Promise {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can upgrade"
+        );
         let code = env::input().expect("no code provided").to_vec();
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
     pub fn freeze_account(&mut self, account_id: AccountId) {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can freeze"
+        );
         self.frozen_accounts.insert(account_id);
     }
 
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
+        require!(
+            self.owner.as_ref() == Some(&env::predecessor_account_id()),
+            "Only owner can unfreeze"
+        );
         self.frozen_accounts.remove(&account_id);
     }
 
