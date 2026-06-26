@@ -311,10 +311,10 @@ async fn test_controller_with_token() -> Result<(), Box<dyn std::error::Error>> 
     let token = deploy_token(&owner, &controller_id).await?;
 
     // CRITICAL: Verify token is deployed with CORRECT owner
-    let token_owner: Option<String> = owner.call(token.id(), "get_owner").view().await?.json()?;
+    let token_owner: String = owner.call(token.id(), "owner_get").view().await?.json()?;
     assert_eq!(
-        token_owner.as_ref().map(|s| s.as_str()),
-        Some(controller_id.as_str()),
+        token_owner.as_str(),
+        controller_id.as_str(),
         "Token owner MUST be controller (not deployer)"
     );
 
@@ -328,9 +328,9 @@ async fn test_controller_with_token() -> Result<(), Box<dyn std::error::Error>> 
     );
 
     // Verify owner field is correctly set by trying to get it again
-    let token_owner_check: Option<String> =
-        owner.call(token.id(), "get_owner").view().await?.json()?;
-    assert_eq!(token_owner_check, Some(controller_id.to_string()));
+    let token_owner_check: String =
+        owner.call(token.id(), "owner_get").view().await?.json()?;
+    assert_eq!(token_owner_check, controller_id.to_string());
 
     println!("✓ Token deployed with controller as owner - ownership model correct");
 
@@ -351,10 +351,10 @@ async fn test_controller_delegates_token_control() -> Result<(), Box<dyn std::er
     let token_id = token.id().clone();
 
     // Test 1: Verify controller IS the owner
-    let token_owner: Option<String> = owner.call(token.id(), "get_owner").view().await?.json()?;
+    let token_owner: String = owner.call(token.id(), "owner_get").view().await?.json()?;
     assert_eq!(
-        token_owner.as_ref().map(|s| s.as_str()),
-        Some(controller_id.as_str()),
+        token_owner.as_str(),
+        controller_id.as_str(),
         "Token owner must be controller"
     );
     println!("✓ Token owner is controller");
