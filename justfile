@@ -1,6 +1,30 @@
+set dotenv-load := true
+
+# Setup aurora-controller if not present
+setup-controller:
+    #!/usr/bin/env bash
+    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
+    if [ ! -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
+        mkdir -p "$TARGET_DIR/contracts"
+        git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$TARGET_DIR/contracts/aurora-controller-factory"
+    fi
+
+# Build aurora-controller using cargo make (puts wasm in res/)
+build-controller: setup-controller
+    #!/usr/bin/env bash
+    cd contracts/aurora-controller-factory
+    cargo make build
+    # Copy wasms back to repo root's target/near dir
+    cd ../..
+    mkdir -p target/near
+    cp contracts/aurora-controller-factory/res/aurora-controller-factory.wasm target/near/ 2>/dev/null || true
+
 # Build token contract with wasm-opt
-build:
+build-token:
     cargo near build non-reproducible-wasm
+
+# Build both token and controller
+build: build-token build-controller
 
 # Run unit tests
 test-unit:
@@ -18,8 +42,14 @@ release: build
 
 # Clean build artifacts
 clean:
+    #!/usr/bin/env bash
     cargo clean
+    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
     rm -rf target/near/
+    if [ -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
+        cd "$TARGET_DIR/contracts/aurora-controller-factory"
+        cargo make clean
+    fi
 
 # Check code
 check:

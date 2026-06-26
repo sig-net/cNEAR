@@ -1,10 +1,23 @@
 use near_sdk::serde_json::json;
 use near_workspaces::types::NearToken;
+use std::path::PathBuf;
+
+/// Resolve wasm path - check CARGO_TARGET_DIR, fallback to ./target
+fn get_wasm_path(contract_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "./target".to_string());
+
+    let wasm_path = PathBuf::from(&target_dir)
+        .join("near")
+        .join(format!("{}.wasm", contract_name));
+
+    std::fs::read(&wasm_path)
+        .map_err(|e| format!("Failed to read {}: {}", wasm_path.display(), e).into())
+}
 
 async fn deploy_token(
     owner: &near_workspaces::Account,
 ) -> Result<near_workspaces::Contract, Box<dyn std::error::Error>> {
-    let token_wasm = std::fs::read("./target/near/fungible_token.wasm")?;
+    let token_wasm = get_wasm_path("fungible_token")?;
     let token_exec = owner
         .create_subaccount("token")
         .initial_balance(NearToken::from_near(10))
@@ -32,6 +45,26 @@ async fn deploy_token(
         .into_result()?;
 
     Ok(token)
+}
+
+async fn deploy_controller(
+    owner: &near_workspaces::Account,
+) -> Result<near_workspaces::Contract, Box<dyn std::error::Error>> {
+    let controller_wasm = get_wasm_path("aurora_controller_factory")?;
+    let controller_exec = owner
+        .create_subaccount("controller")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?;
+
+    let controller_account = controller_exec.result;
+    let controller_deploy = controller_account.deploy(&controller_wasm).await?;
+    let controller = controller_deploy.result;
+
+    // TODO: Initialize controller with appropriate params
+    // For now, just deploy the binary
+
+    Ok(controller)
 }
 
 #[tokio::test]
