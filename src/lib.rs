@@ -24,23 +24,21 @@ use near_contract_standards::fungible_token::{
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
-use near_plugins::{only, Ownable};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
-use near_sdk::store::{LookupSet, IterableSet};
+use near_sdk::store::LookupSet;
 use near_sdk::{
     assert_one_yocto, env, log, near, require, AccountId, BorshStorageKey, NearToken,
     PanicOnDefault, Promise, PromiseOrValue,
 };
 
-#[derive(PanicOnDefault, Ownable)]
+#[derive(PanicOnDefault)]
 #[near(contract_state)]
 pub struct Contract {
     token: FungibleToken,
     metadata: LazyOption<FungibleTokenMetadata>,
     frozen_accounts: LookupSet<AccountId>,
-    guardians: IterableSet<AccountId>,
     paused: bool,
 }
 
@@ -50,7 +48,6 @@ enum StorageKey {
     FungibleToken,
     Metadata,
     FrozenAccounts,
-    Guardians,
 }
 
 #[near]
@@ -65,10 +62,9 @@ impl Contract {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
-            guardians: IterableSet::new(StorageKey::Guardians),
             paused: false,
         };
-        this.owner_set(Some(owner_id.clone()));
+        
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
 
@@ -82,27 +78,10 @@ impl Contract {
         this
     }
 
-    #[only(owner)]
-    pub fn set_guardians(&mut self, guardians: Vec<AccountId>) {
-        // Clear existing guardians
-        self.guardians.clear();
-        // Add new guardians
-        for guardian in guardians {
-            self.guardians.insert(guardian);
-        }
-    }
-
     pub fn pause(&mut self) {
-        let caller = env::predecessor_account_id();
-        let is_guardian = self.guardians.contains(&caller);
-        require!(
-            is_guardian || self.owner_is(),
-            "Pause: Caller must be owner or guardian"
-        );
         self.paused = true;
     }
 
-    #[only(owner)]
     pub fn unpause(&mut self) {
         self.paused = false;
     }
@@ -113,18 +92,15 @@ impl Contract {
 
     /// Upgrade contract code. Callable only by owner (multisig or controller).
     /// Can be transferred to controller contract for staged upgrades.
-    #[only(owner)]
     pub fn upgrade(&self) -> Promise {
         let code = env::input().expect("no code provided").to_vec();
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
-    #[only(owner)]
     pub fn freeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.insert(account_id);
     }
 
-    #[only(owner)]
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.remove(&account_id);
     }
@@ -134,7 +110,6 @@ impl Contract {
     }
 
     #[payable]
-    #[only(owner)]
     pub fn force_ft_transfer(
         &mut self,
         sender_id: AccountId,
@@ -973,19 +948,6 @@ mod tests {
         assert_eq!(contract.ft_balance_of(user2()).0, transfer_amount);
     }
 
-    #[should_panic(expected = "Ownable: Method must be called from owner")]
-    #[test]
-    fn test_force_transfer_panics_for_non_owner() {
-        let (mut contract, mut context) = setup();
-        register_user(&mut contract, &mut context, user1());
-
-        testing_env!(context
-            .predecessor_account_id(user1())
-            .attached_deposit(NearToken::from_yoctonear(1))
-            .build());
-        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
-    }
-
     #[should_panic]
     #[test]
     fn test_force_transfer_panics_on_zero_deposit() {
@@ -1020,27 +982,6 @@ mod tests {
 
         contract.unfreeze_account(user1());
         assert!(!contract.is_frozen(user1()));
-    }
-
-    #[should_panic(expected = "Ownable: Method must be called from owner")]
-    #[test]
-    fn test_freeze_panics_for_non_owner() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.freeze_account(user2());
-    }
-
-    #[should_panic(expected = "Ownable: Method must be called from owner")]
-    #[test]
-    fn test_unfreeze_panics_for_non_owner() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.freeze_account(user1());
-
-        testing_env!(context.predecessor_account_id(user2()).build());
-        contract.unfreeze_account(user1());
     }
 
     #[should_panic(expected = "Sender account is frozen")]
@@ -1102,26 +1043,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_guardians() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.set_guardians(vec![user1(), user2()]);
-
-        assert!(contract.guardians.contains(&user1()));
-        assert!(contract.guardians.contains(&user2()));
-    }
-
-    #[should_panic(expected = "Ownable: Method must be called from owner")]
-    #[test]
-    fn test_set_guardians_panics_for_non_owner() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.set_guardians(vec![user2()]);
-    }
-
-    #[test]
     fn test_pause_by_owner() {
         let (mut contract, mut context) = setup();
 
@@ -1129,28 +1050,6 @@ mod tests {
         contract.pause();
 
         assert!(contract.is_paused());
-    }
-
-    #[test]
-    fn test_pause_by_guardian() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.set_guardians(vec![user1()]);
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.pause();
-
-        assert!(contract.is_paused());
-    }
-
-    #[should_panic(expected = "Pause: Caller must be owner or guardian")]
-    #[test]
-    fn test_pause_panics_for_non_authorized() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.pause();
     }
 
     #[test]
@@ -1163,18 +1062,6 @@ mod tests {
 
         contract.unpause();
         assert!(!contract.is_paused());
-    }
-
-    #[should_panic(expected = "Ownable: Method must be called from owner")]
-    #[test]
-    fn test_unpause_panics_for_non_owner() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.unpause();
     }
 
     #[should_panic(expected = "Token transfers paused")]
@@ -1229,22 +1116,6 @@ mod tests {
     }
 
     #[test]
-    fn test_guardian_pause_owner_unpause() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.set_guardians(vec![user1()]);
-
-        testing_env!(context.predecessor_account_id(user1()).build());
-        contract.pause();
-        assert!(contract.is_paused());
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.unpause();
-        assert!(!contract.is_paused());
-    }
-
-    #[test]
     fn test_pause_idempotent() {
         let (mut contract, mut context) = setup();
 
@@ -1254,19 +1125,6 @@ mod tests {
 
         contract.pause();
         assert!(contract.is_paused());
-    }
-
-    #[test]
-    fn test_set_guardians_empty_vec() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.set_guardians(vec![user1(), user2()]);
-        assert!(contract.guardians.contains(&user1()));
-
-        contract.set_guardians(vec![]);
-        assert!(!contract.guardians.contains(&user1()));
-        assert!(!contract.guardians.contains(&user2()));
     }
 
     #[should_panic(expected = "Sender account is frozen")]
@@ -1329,20 +1187,6 @@ mod tests {
         contract.ft_transfer(user1(), transfer_amount.into(), None);
 
         assert_eq!(contract.ft_balance_of(user1()).0, transfer_amount);
-    }
-
-    #[test]
-    fn test_set_guardians_replaces_previous() {
-        let (mut contract, mut context) = setup();
-
-        testing_env!(context.predecessor_account_id(owner()).build());
-        contract.set_guardians(vec![user1()]);
-        assert!(contract.guardians.contains(&user1()));
-        assert!(!contract.guardians.contains(&user2()));
-
-        contract.set_guardians(vec![user2()]);
-        assert!(!contract.guardians.contains(&user1()));
-        assert!(contract.guardians.contains(&user2()));
     }
 
     #[should_panic(expected = "Receiver account is frozen")]
