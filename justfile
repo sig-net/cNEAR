@@ -65,8 +65,24 @@ all: check build test
 
 # Deploy contracts (interactive or CLI mode)
 # Usage: just deploy [testnet|mainnet|test] [signer_id] [--dry-run]
-deploy *ARGS: build
+deploy *ARGS:
     #!/usr/bin/env bash
+    set -e
+    
+    # Build contracts with suppressed output (show only on error)
+    echo "Building contracts..."
+    BUILD_OUTPUT=$(just build 2>&1)
+    BUILD_EXIT=$?
+    
+    if [ $BUILD_EXIT -ne 0 ]; then
+        echo "$BUILD_OUTPUT"
+        echo "Build failed. Aborting deployment."
+        exit $BUILD_EXIT
+    fi
+    echo "✓ Build complete"
+    echo ""
+    
+    # Run deployment
     ARGS_STR="{{ARGS}}"
     if [[ "$ARGS_STR" == "test" || "$ARGS_STR" == "test "* ]]; then
         # Test mode: auto-select testnet, only prompt for signer
