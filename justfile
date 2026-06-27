@@ -65,7 +65,7 @@ all: check build test
 
 # Deploy contracts (interactive or CLI mode)
 # Usage: just deploy [testnet|mainnet|test] [signer_id] [--dry-run]
-deploy *ARGS:
+deploy *ARGS: build
     #!/usr/bin/env bash
     ARGS_STR="{{ARGS}}"
     if [[ "$ARGS_STR" == "test" || "$ARGS_STR" == "test "* ]]; then
