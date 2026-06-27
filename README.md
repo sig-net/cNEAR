@@ -8,6 +8,17 @@ This is a standard FT contract that additionally:
 - Integrates with aurora-controller-factory for upgrades and access control
 - Uses near-plugins AccessControllable pattern for owner role management
 
+## Features
+
+- **Standard FT functionality** - Full NEP-141 fungible token implementation
+- **Pausable** - Owner can pause/unpause all token transfers
+- **Account freezing** - Owner can freeze individual accounts to prevent their transfers
+- **Force transfers** - Owner can move tokens between any accounts
+- **Upgradeable** - Owner can upgrade contract code
+- **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
+- **Access control** - Role-based permissions using near-plugins AccessControllable
+- **Automated deployment** - Smart deployment script that auto-creates accounts and handles ownership transfer
+
 ## How to Build Locally?
 
 Install [`cargo-near`](https://github.com/near/cargo-near) and run:
@@ -88,12 +99,15 @@ just deploy mainnet your-account.near --dry-run
 - Token account ID  
 - Token metadata (name, symbol, decimals)
 - Total supply
+- Initial balance for new accounts (default: 10 NEAR)
 
 **Production deployment flow:**
-1. Deploys controller contract
-2. Deploys token contract with signer as initial owner
-3. Transfers token ownership to controller
-4. Verifies ownership
+1. Checks if controller account exists, creates if needed
+2. Checks if token account exists, creates if needed
+3. Deploys controller contract
+4. Deploys token contract with signer as initial owner
+5. Transfers token ownership to controller
+6. Verifies ownership
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`

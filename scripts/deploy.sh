@@ -199,14 +199,18 @@ if [[ $ORIGINAL_ARGC -eq 0 && "$TEST_MODE" == "false" ]]; then
     
     read -p "Total supply [1000000000000000]: " TOTAL_SUPPLY
     TOTAL_SUPPLY=${TOTAL_SUPPLY:-"1000000000000000"}
+    
+    read -p "Initial balance for new accounts in NEAR [10]: " INITIAL_BALANCE
+    INITIAL_BALANCE=${INITIAL_BALANCE:-10}
 else
     # Use defaults for CLI mode and test mode
     CONTROLLER_ID="controller.$SIGNER_ID"
     TOKEN_ID="token.$SIGNER_ID"
-    TOKEN_NAME="cNEAR"
+    TOKEN_NAME="Controlled NEAR"
     TOKEN_SYMBOL="cNEAR"
     TOKEN_DECIMALS=24
     TOTAL_SUPPLY="1000000000000000"
+    INITIAL_BALANCE=10
     
     if [[ "$TEST_MODE" == "true" ]]; then
         echo -e "${BLUE}Test mode: Using default configuration${NC}"
@@ -250,13 +254,52 @@ if [[ "$TEST_MODE" == "true" ]]; then
     
     # Create controller subaccount
     echo -e "\n${BLUE}Creating controller account...${NC}"
-    CREATE_CONTROLLER_CMD="$NEAR_CMD create-account $CONTROLLER_ID --masterAccount $SIGNER_ID --initialBalance 10 --networkId $NETWORK"
+    CREATE_CONTROLLER_CMD="$NEAR_CMD create-account $CONTROLLER_ID --masterAccount $SIGNER_ID --initialBalance $INITIAL_BALANCE --networkId $NETWORK"
     run_cmd "$CREATE_CONTROLLER_CMD"
     
     # Create token subaccount
     echo -e "\n${BLUE}Creating token account...${NC}"
-    CREATE_TOKEN_CMD="$NEAR_CMD create-account $TOKEN_ID --masterAccount $SIGNER_ID --initialBalance 10 --networkId $NETWORK"
+    CREATE_TOKEN_CMD="$NEAR_CMD create-account $TOKEN_ID --masterAccount $SIGNER_ID --initialBalance $INITIAL_BALANCE --networkId $NETWORK"
     run_cmd "$CREATE_TOKEN_CMD"
+else
+    # In non-test mode, check if accounts exist and create if needed
+    echo -e "${GREEN}=== Checking Account Existence ===${NC}"
+    
+    # Check controller account
+    if [[ "$DRY_RUN" == "false" ]]; then
+        CONTROLLER_EXISTS=$($NEAR_CMD state $CONTROLLER_ID --networkId $NETWORK 2>&1 | grep -q "Account" && echo "true" || echo "false")
+    else
+        CONTROLLER_EXISTS="unknown"
+    fi
+    
+    if [[ "$CONTROLLER_EXISTS" == "false" ]]; then
+        echo -e "${YELLOW}Controller account $CONTROLLER_ID does not exist${NC}"
+        echo -e "\n${BLUE}Creating controller account...${NC}"
+        CREATE_CONTROLLER_CMD="$NEAR_CMD create-account $CONTROLLER_ID --masterAccount $SIGNER_ID --initialBalance $INITIAL_BALANCE --networkId $NETWORK"
+        run_cmd "$CREATE_CONTROLLER_CMD"
+    elif [[ "$CONTROLLER_EXISTS" == "true" ]]; then
+        echo -e "${GREEN}✓ Controller account $CONTROLLER_ID exists${NC}"
+    else
+        echo -e "${YELLOW}Skipping account existence check in dry-run mode${NC}"
+    fi
+    
+    # Check token account
+    if [[ "$DRY_RUN" == "false" ]]; then
+        TOKEN_EXISTS=$($NEAR_CMD state $TOKEN_ID --networkId $NETWORK 2>&1 | grep -q "Account" && echo "true" || echo "false")
+    else
+        TOKEN_EXISTS="unknown"
+    fi
+    
+    if [[ "$TOKEN_EXISTS" == "false" ]]; then
+        echo -e "${YELLOW}Token account $TOKEN_ID does not exist${NC}"
+        echo -e "\n${BLUE}Creating token account...${NC}"
+        CREATE_TOKEN_CMD="$NEAR_CMD create-account $TOKEN_ID --masterAccount $SIGNER_ID --initialBalance $INITIAL_BALANCE --networkId $NETWORK"
+        run_cmd "$CREATE_TOKEN_CMD"
+    elif [[ "$TOKEN_EXISTS" == "true" ]]; then
+        echo -e "${GREEN}✓ Token account $TOKEN_ID exists${NC}"
+    else
+        echo -e "${YELLOW}Skipping account existence check in dry-run mode${NC}"
+    fi
 fi
 
 # Step 1: Deploy controller
