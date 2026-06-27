@@ -63,6 +63,11 @@ fmt:
 # Full pipeline: check, build, test
 all: check build test
 
+# Deploy contracts (interactive or CLI mode)
+# Usage: just deploy [testnet|mainnet] [signer_id] [--dry-run]
+deploy *ARGS:
+    ./scripts/deploy.sh {{ARGS}}
+
 # Help
 help:
     @just --list
