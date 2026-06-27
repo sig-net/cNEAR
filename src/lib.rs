@@ -455,7 +455,7 @@ mod tests {
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
 
-        assert_eq!(contract.storage_unregister(None), true);
+        assert!(contract.storage_unregister(None));
 
         assert!(contract.storage_balance_of(user1()).is_none());
     }
@@ -492,7 +492,7 @@ mod tests {
             .build());
 
         // "false" indicates that the account wasn't registered
-        assert_eq!(contract.storage_unregister(None), false);
+        assert!(!contract.storage_unregister(None));
     }
 
     #[should_panic]
@@ -553,7 +553,7 @@ mod tests {
 
         // force to unregister no matter what
         // this reduces total supply because user's tokens are burnt
-        assert_eq!(contract.storage_unregister(Some(true)), true);
+        assert!(contract.storage_unregister(Some(true)));
 
         assert!(contract.storage_balance_of(user1()).is_none());
         assert_eq!(contract.ft_balance_of(user1()).0, 0);
