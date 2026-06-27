@@ -24,7 +24,7 @@ use near_contract_standards::fungible_token::{
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
-use near_plugins::{access_control_any, AccessControlRole, AccessControllable, access_control};
+use near_plugins::{access_control, access_control_any, AccessControlRole, AccessControllable};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
@@ -117,7 +117,7 @@ impl Contract {
         let code = env::input().expect("no code provided").to_vec();
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
-    
+
     #[access_control_any(roles(Role::Owner))]
     pub fn freeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.insert(account_id);

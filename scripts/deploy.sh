@@ -15,6 +15,7 @@ ORIGINAL_ARGC=$#
 NETWORK=""
 SIGNER_ID=""
 DRY_RUN=false
+TEST_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
+        --test-mode)
+            TEST_MODE=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [testnet|mainnet] [signer_id] [--dry-run]"
             echo ""
@@ -33,12 +38,16 @@ while [[ $# -gt 0 ]]; do
             echo "  testnet|mainnet    Target network (default: testnet)"
             echo "  signer_id          Account ID to use for deployment"
             echo "  --dry-run          Show commands without executing"
+            echo "  --test-mode        Quick deployment to testnet (only prompt for signer)"
             echo ""
             echo "Examples:"
             echo "  $0                              # Interactive mode"
             echo "  $0 testnet                      # Interactive signer selection"
             echo "  $0 testnet alice.testnet        # Full CLI mode"
             echo "  $0 mainnet bob.near --dry-run   # Dry run"
+            echo ""
+            echo "Via justfile:"
+            echo "  just deploy test                # Quick testnet deployment"
             exit 0
             ;;
         *)
@@ -53,8 +62,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Interactive network selection if not provided
-if [[ -z "$NETWORK" ]]; then
+# Interactive network selection if not provided (skip in test mode)
+if [[ -z "$NETWORK" && "$TEST_MODE" == "false" ]]; then
     echo -e "${BLUE}Select network:${NC}"
     echo "  1) testnet (default)"
     echo "  2) mainnet"
@@ -66,6 +75,9 @@ if [[ -z "$NETWORK" ]]; then
         2) NETWORK="mainnet" ;;
         *) echo -e "${RED}Invalid choice. Using testnet.${NC}"; NETWORK="testnet" ;;
     esac
+elif [[ -z "$NETWORK" ]]; then
+    # Test mode defaults to testnet
+    NETWORK="testnet"
 fi
 
 echo -e "${GREEN}Network: $NETWORK${NC}"
@@ -105,7 +117,11 @@ if [[ -z "$SIGNER_ID" ]]; then
         exit 1
     fi
     
-    read -p "Select account [1]: " account_choice
+    if [[ "$TEST_MODE" == "true" ]]; then
+        read -p "Select signer account for test deployment [1]: " account_choice
+    else
+        read -p "Select account [1]: " account_choice
+    fi
     account_choice=${account_choice:-1}
     
     if [[ $account_choice -lt 1 || $account_choice -gt ${#ACCOUNTS[@]} ]]; then
@@ -159,8 +175,12 @@ if [[ -f "$TOKEN_WASM" && -f "$CONTROLLER_WASM" ]]; then
     echo -e "${GREEN}✓ Wasm files found${NC}"
 fi
 
-# Deployment configuration prompts (only if no args provided - fully interactive)
-if [[ $ORIGINAL_ARGC -eq 0 ]]; then
+# Deployment configuration prompts
+# - Fully interactive mode: prompt for everything
+# - Test mode: use defaults, skip prompts
+# - CLI mode: use defaults
+if [[ $ORIGINAL_ARGC -eq 0 && "$TEST_MODE" == "false" ]]; then
+    # Fully interactive - prompt for all config
     echo -e "\n${BLUE}Deployment Configuration:${NC}"
     read -p "Controller account ID [controller.$SIGNER_ID]: " CONTROLLER_ID
     CONTROLLER_ID=${CONTROLLER_ID:-"controller.$SIGNER_ID"}
@@ -180,13 +200,17 @@ if [[ $ORIGINAL_ARGC -eq 0 ]]; then
     read -p "Total supply [1000000000000000]: " TOTAL_SUPPLY
     TOTAL_SUPPLY=${TOTAL_SUPPLY:-"1000000000000000"}
 else
-    # Use sensible defaults for CLI mode
+    # Use defaults for CLI mode and test mode
     CONTROLLER_ID="controller.$SIGNER_ID"
     TOKEN_ID="token.$SIGNER_ID"
-    TOKEN_NAME="Controlled NEAR"
+    TOKEN_NAME="cNEAR"
     TOKEN_SYMBOL="cNEAR"
     TOKEN_DECIMALS=24
     TOTAL_SUPPLY="1000000000000000"
+    
+    if [[ "$TEST_MODE" == "true" ]]; then
+        echo -e "${BLUE}Test mode: Using default configuration${NC}"
+    fi
 fi
 
 # Show deployment summary
@@ -220,36 +244,57 @@ run_cmd() {
     fi
 }
 
+# In test mode, create subaccounts first
+if [[ "$TEST_MODE" == "true" ]]; then
+    echo -e "${GREEN}=== Test Mode: Creating Subaccounts ===${NC}"
+    
+    # Create controller subaccount
+    echo -e "\n${BLUE}Creating controller account...${NC}"
+    CREATE_CONTROLLER_CMD="$NEAR_CMD create-account $CONTROLLER_ID --masterAccount $SIGNER_ID --initialBalance 10 --networkId $NETWORK"
+    run_cmd "$CREATE_CONTROLLER_CMD"
+    
+    # Create token subaccount
+    echo -e "\n${BLUE}Creating token account...${NC}"
+    CREATE_TOKEN_CMD="$NEAR_CMD create-account $TOKEN_ID --masterAccount $SIGNER_ID --initialBalance 10 --networkId $NETWORK"
+    run_cmd "$CREATE_TOKEN_CMD"
+fi
+
 # Step 1: Deploy controller
 echo -e "${GREEN}=== Step 1: Deploy Controller ===${NC}"
-DEPLOY_CONTROLLER_CMD="$NEAR_CMD contract deploy $CONTROLLER_ID use-file $CONTROLLER_WASM with-init-call new json-args '{\"dao\":\"$SIGNER_ID\"}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' network-config $NETWORK sign-with-keychain send"
+DEPLOY_CONTROLLER_CMD="$NEAR_CMD deploy $CONTROLLER_ID $CONTROLLER_WASM --initFunction new --initArgs '{\"dao\":\"$SIGNER_ID\"}' --networkId $NETWORK"
 
 run_cmd "$DEPLOY_CONTROLLER_CMD"
 
 # Step 2: Deploy token with signer as initial owner
 echo -e "${GREEN}=== Step 2: Deploy Token with Signer as Initial Owner ===${NC}"
-DEPLOY_TOKEN_CMD="$NEAR_CMD contract deploy $TOKEN_ID use-file $TOKEN_WASM with-init-call new json-args '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS}}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' network-config $NETWORK sign-with-keychain send"
+DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --initArgs '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS}}' --networkId $NETWORK"
 
 run_cmd "$DEPLOY_TOKEN_CMD"
 
 # Step 3: Transfer token ownership to controller
 echo -e "${GREEN}=== Step 3: Transfer Token Ownership to Controller ===${NC}"
-TRANSFER_OWNERSHIP_CMD="$NEAR_CMD contract call-function as-transaction $TOKEN_ID owner_set json-args '{\"new_owner\":\"$CONTROLLER_ID\"}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' sign-as $SIGNER_ID network-config $NETWORK sign-with-keychain send"
+TRANSFER_OWNERSHIP_CMD="$NEAR_CMD call $TOKEN_ID owner_set '{\"new_owner\":\"$CONTROLLER_ID\"}' --accountId $SIGNER_ID --networkId $NETWORK"
 
 run_cmd "$TRANSFER_OWNERSHIP_CMD"
 
 # Step 4: Verify ownership
 echo -e "${GREEN}=== Step 4: Verify Ownership ===${NC}"
-VERIFY_CMD="$NEAR_CMD contract call-function as-read-only $TOKEN_ID owner_get json-args {} network-config $NETWORK now"
+VERIFY_CMD="$NEAR_CMD view $TOKEN_ID owner_get '{}' --networkId $NETWORK"
 
 if [[ "$DRY_RUN" == "false" ]]; then
     echo -e "${BLUE}Verifying token owner...${NC}"
-    OWNER_RESULT=$(eval "$VERIFY_CMD" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || echo "")
+    OWNER_OUTPUT=$(eval "$VERIFY_CMD" 2>&1 || echo "")
     
-    if [[ "$OWNER_RESULT" == "$CONTROLLER_ID" ]]; then
+    # Extract account ID - handle both quoted and unquoted output
+    OWNER_RESULT=$(echo "$OWNER_OUTPUT" | grep -oE '(controller\.[a-z0-9\-\.]+|"[^"]+")' | tr -d '"' | tail -1)
+    
+    if [[ -n "$OWNER_RESULT" && "$OWNER_RESULT" == "$CONTROLLER_ID" ]]; then
         echo -e "${GREEN}✓ Ownership verified: $OWNER_RESULT${NC}\n"
     else
-        echo -e "${RED}✗ Ownership verification failed. Expected: $CONTROLLER_ID, Got: $OWNER_RESULT${NC}\n"
+        echo -e "${RED}✗ Ownership verification failed.${NC}"
+        echo -e "Expected: ${BLUE}$CONTROLLER_ID${NC}"
+        echo -e "Got:      ${BLUE}$OWNER_RESULT${NC}"
+        echo -e "Raw output: $OWNER_OUTPUT\n"
     fi
 else
     echo -e "${BLUE}Command:${NC} $VERIFY_CMD"
@@ -262,11 +307,37 @@ if [[ "$DRY_RUN" == "false" ]]; then
     echo -e "Controller: ${BLUE}$CONTROLLER_ID${NC}"
     echo -e "Token:      ${BLUE}$TOKEN_ID${NC}"
     echo -e "Owner:      ${BLUE}$CONTROLLER_ID${NC}"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Add release info to controller"
-    echo "  2. Test pause/freeze via controller"
-    echo "  3. Test upgrades via controller"
+    
+    # In test mode, clean up by deleting temporary accounts
+    if [[ "$TEST_MODE" == "true" ]]; then
+        echo -e "\n${YELLOW}=== Test Mode Cleanup ===${NC}"
+        echo -e "Deleting temporary accounts with beneficiary: ${BLUE}$SIGNER_ID${NC}"
+        
+        # Delete token account first (must delete before controller since controller is owner)
+        echo -e "\n${BLUE}Deleting token account...${NC}"
+        DELETE_TOKEN_CMD="$NEAR_CMD delete-account $TOKEN_ID $SIGNER_ID --networkId $NETWORK"
+        run_cmd "$DELETE_TOKEN_CMD"
+        
+        # Delete controller account
+        echo -e "\n${BLUE}Deleting controller account...${NC}"
+        DELETE_CONTROLLER_CMD="$NEAR_CMD delete-account $CONTROLLER_ID $SIGNER_ID --networkId $NETWORK"
+        run_cmd "$DELETE_CONTROLLER_CMD"
+        
+        echo -e "${GREEN}✓ Cleanup complete - funds returned to $SIGNER_ID${NC}"
+    else
+        echo ""
+        echo "Next steps:"
+        echo "  1. Add release info to controller"
+        echo "  2. Test pause/freeze via controller"
+        echo "  3. Test upgrades via controller"
+    fi
 else
+    if [[ "$TEST_MODE" == "true" ]]; then
+        echo -e "\n${YELLOW}=== Test Mode Cleanup (Dry Run) ===${NC}"
+        echo -e "${BLUE}Command:${NC} $NEAR_CMD delete-account $TOKEN_ID $SIGNER_ID --networkId $NETWORK"
+        echo -e "${YELLOW}[DRY RUN - not executed]${NC}\n"
+        echo -e "${BLUE}Command:${NC} $NEAR_CMD delete-account $CONTROLLER_ID $SIGNER_ID --networkId $NETWORK"
+        echo -e "${YELLOW}[DRY RUN - not executed]${NC}\n"
+    fi
     echo -e "${YELLOW}=== Dry Run Complete - No changes made ===${NC}"
 fi

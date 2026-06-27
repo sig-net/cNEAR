@@ -64,9 +64,18 @@ fmt:
 all: check build test
 
 # Deploy contracts (interactive or CLI mode)
-# Usage: just deploy [testnet|mainnet] [signer_id] [--dry-run]
+# Usage: just deploy [testnet|mainnet|test] [signer_id] [--dry-run]
 deploy *ARGS:
-    ./scripts/deploy.sh {{ARGS}}
+    #!/usr/bin/env bash
+    ARGS_STR="{{ARGS}}"
+    if [[ "$ARGS_STR" == "test" || "$ARGS_STR" == "test "* ]]; then
+        # Test mode: auto-select testnet, only prompt for signer
+        REMAINING_ARGS="${ARGS_STR#test}"
+        REMAINING_ARGS="${REMAINING_ARGS# }"
+        ./scripts/deploy.sh testnet $REMAINING_ARGS --test-mode
+    else
+        ./scripts/deploy.sh {{ARGS}}
+    fi
 
 # Help
 help:

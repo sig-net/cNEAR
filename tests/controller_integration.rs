@@ -328,8 +328,7 @@ async fn test_controller_with_token() -> Result<(), Box<dyn std::error::Error>> 
     );
 
     // Verify owner field is correctly set by trying to get it again
-    let token_owner_check: String =
-        owner.call(token.id(), "owner_get").view().await?.json()?;
+    let token_owner_check: String = owner.call(token.id(), "owner_get").view().await?.json()?;
     assert_eq!(token_owner_check, controller_id.to_string());
 
     println!("✓ Token deployed with controller as owner - ownership model correct");
