@@ -2,6 +2,8 @@ use near_sdk::serde_json::json;
 use near_workspaces::types::NearToken;
 use std::path::PathBuf;
 
+const INITIAL_PRICE: u128 = 1612;
+
 /// Resolve wasm path - check CARGO_TARGET_DIR, fallback to ./target
 fn get_wasm_path(contract_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "./target".to_string());
@@ -39,7 +41,8 @@ async fn deploy_token(
                 "name": "Test",
                 "symbol": "TEST",
                 "decimals": 24,
-            }
+            },
+            "latest_price": INITIAL_PRICE.to_string(),
         }))
         .transact()
         .await?

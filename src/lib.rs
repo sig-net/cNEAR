@@ -49,6 +49,7 @@ pub struct Contract {
     frozen_accounts: LookupSet<AccountId>,
     paused: bool,
     owner_id: AccountId,
+    latest_price: u128,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -64,7 +65,12 @@ impl Contract {
     /// Initializes the contract with the given total supply owned by the given `owner_id` with
     /// the given fungible token metadata.
     #[init]
-    pub fn new(owner_id: AccountId, total_supply: U128, metadata: FungibleTokenMetadata) -> Self {
+    pub fn new(
+        owner_id: AccountId,
+        total_supply: U128,
+        metadata: FungibleTokenMetadata,
+        latest_price: U128,
+    ) -> Self {
         require!(!env::state_exists(), "Already initialized");
         metadata.assert_valid();
         let mut this = Self {
@@ -73,6 +79,7 @@ impl Contract {
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
             paused: false,
             owner_id: owner_id.clone(),
+            latest_price: latest_price.into(),
         };
 
         // Grant Owner role to owner_id
@@ -130,6 +137,15 @@ impl Contract {
 
     pub fn is_frozen(&self, account_id: AccountId) -> bool {
         self.frozen_accounts.contains(&account_id)
+    }
+
+    #[access_control_any(roles(Role::Owner))]
+    pub fn set_latest_price(&mut self, price: U128) {
+        self.latest_price = price.into();
+    }
+
+    pub fn get_latest_price(&self) -> U128 {
+        self.latest_price.into()
     }
 
     pub fn owner_get(&self) -> AccountId {
@@ -287,6 +303,7 @@ mod tests {
     use super::*;
 
     const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000;
+    const INITIAL_PRICE: u128 = 1612;
 
     fn current() -> AccountId {
         accounts(0)
@@ -324,6 +341,7 @@ mod tests {
                 reference_hash: None,
                 decimals: 24,
             },
+            INITIAL_PRICE.into(),
         );
 
         context.storage_usage(env::storage_usage());
@@ -1231,6 +1249,31 @@ mod tests {
         contract.ft_transfer(user1(), transfer_amount.into(), None);
 
         assert_eq!(contract.ft_balance_of(user1()).0, transfer_amount);
+    }
+
+    #[test]
+    fn test_latest_price_set_initially() {
+        let (contract, _) = setup();
+        assert_eq!(contract.get_latest_price().0, INITIAL_PRICE);
+    }
+
+    #[test]
+    fn test_set_latest_price_by_owner() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.set_latest_price(1_000_000.into());
+
+        assert_eq!(contract.get_latest_price().0, 1_000_000);
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_set_latest_price_panics_on_non_owner() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(user1()).build());
+        contract.set_latest_price(1_000_000.into());
     }
 
     #[should_panic(expected = "Receiver account is frozen")]

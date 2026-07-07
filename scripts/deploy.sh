@@ -310,7 +310,7 @@ run_cmd "$DEPLOY_CONTROLLER_CMD"
 
 # Step 2: Deploy token with signer as initial owner
 echo -e "${GREEN}=== Step 2: Deploy Token with Signer as Initial Owner ===${NC}"
-DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --initArgs '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS}}' --networkId $NETWORK"
+DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --initArgs '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS},\"latest_price\":\"0\"}' --networkId $NETWORK"
 
 run_cmd "$DEPLOY_TOKEN_CMD"
 
