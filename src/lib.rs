@@ -62,8 +62,7 @@ enum StorageKey {
 
 #[near]
 impl Contract {
-    /// Initializes the contract with the given total supply owned by the given `owner_id` with
-    /// the given fungible token metadata.
+    /// Initializes the contract with the given total supply owned by the given `owner_id` with the given fungible token metadata.
     #[init]
     pub fn new(
         owner_id: AccountId,
@@ -144,6 +143,12 @@ impl Contract {
         self.latest_price = price.into();
     }
 
+    /// Returns the price of 1 cNEAR in yoctoNEAR (so 10^24 means 1 NEAR = 1 cNEAR), matching LiNEAR's `ft_price` interface. The value is set by the owner and reflects the rate at the most recent of:
+    /// - the last issuance,
+    /// - the last redemption, or
+    /// - the monthly published redemption price derived from fund NAV.
+    ///
+    /// This is an indicative reference price, NOT a redemption quote. The only reliable redemption price is an actual quote (e.g. via NEAR Intents), and realized rates can differ substantially — especially during periods of heavy redemptions, when public floor prices may be withdrawn entirely. Do not use this as a price oracle: computing LTV from this value in a pool that lends NEAR against cNEAR risks user funds.
     pub fn get_latest_price(&self) -> U128 {
         self.latest_price.into()
     }
