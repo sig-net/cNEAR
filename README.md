@@ -99,7 +99,7 @@ just deploy mainnet your-account.near --dry-run
 - Token account ID  
 - Token metadata (name, symbol, decimals)
 - Total supply
-- Initial price in yoctoNEAR (default: ONE_NEAR = 10^24)
+- Initial price in yoctoNEAR (default: ONE_NEAR = 10^24, this implies 1 NEAR = 1 cNEAR)
 - Initial balance for new accounts (default: 10 NEAR)
 
 **Production deployment flow:**
