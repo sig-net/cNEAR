@@ -99,6 +99,7 @@ just deploy mainnet your-account.near --dry-run
 - Token account ID  
 - Token metadata (name, symbol, decimals)
 - Total supply
+- Initial price in yoctoNEAR (default: ONE_NEAR = 10^24)
 - Initial balance for new accounts (default: 10 NEAR)
 
 **Production deployment flow:**
@@ -125,8 +126,8 @@ cargo near create-account <contract-account-id> --useFaucet
 # Deploy the contract on it
 cargo near deploy <contract-account-id>
 
-# Initialize the contract
-near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "1000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 8 }}' --accountId <contract-account-id>
+# Initialize the contract (latest_price is in yoctoNEAR, ONE_NEAR = 10^24)
+near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "1000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 8 }, "latest_price": "1000000000000000000000000"}' --accountId <contract-account-id>
 ```
 
 ## Basic methods
@@ -142,6 +143,9 @@ near call <contract-account-id> storage_deposit '' --accountId <account-id> --am
 
 # View balance
 near view <contract-account-id> ft_balance_of '{"account_id": "<account-id>"}'
+
+# View latest price
+near view <contract-account-id> get_latest_price
 
 # Transfer tokens
 near call <contract-account-id> ft_transfer '{"receiver_id": "<account-id>", "amount": "19"}' --accountId <contract-account-id> --amount 0.000000000000000000000001
@@ -167,6 +171,9 @@ near view <contract-account-id> is_frozen '{"account_id": "<target-account-id>"}
 
 # Force transfer (owner only)
 near call <contract-account-id> force_ft_transfer '{"sender_id": "<from-account>", "receiver_id": "<to-account>", "amount": "1000"}' --accountId <owner-account-id> --amount 0.000000000000000000000001
+
+# Set latest price (owner only)
+near call <contract-account-id> set_latest_price '{"price": "1000000000000000000000000"}' --accountId <owner-account-id>
 
 # Transfer ownership (owner only)
 near call <contract-account-id> owner_set '{"new_owner": "<new-owner-account-id>"}' --accountId <owner-account-id>

@@ -199,7 +199,10 @@ if [[ $ORIGINAL_ARGC -eq 0 && "$TEST_MODE" == "false" ]]; then
     
     read -p "Total supply [1000000000000000]: " TOTAL_SUPPLY
     TOTAL_SUPPLY=${TOTAL_SUPPLY:-"1000000000000000"}
-    
+
+    read -p "Initial price in yoctoNEAR [1000000000000000000000000 (1 NEAR)]: " INITIAL_PRICE
+    INITIAL_PRICE=${INITIAL_PRICE:-"1000000000000000000000000"}
+
     read -p "Initial balance for new accounts in NEAR [10]: " INITIAL_BALANCE
     INITIAL_BALANCE=${INITIAL_BALANCE:-10}
 else
@@ -210,6 +213,7 @@ else
     TOKEN_SYMBOL="cNEAR"
     TOKEN_DECIMALS=24
     TOTAL_SUPPLY="1000000000000000"
+    INITIAL_PRICE="1000000000000000000000000"
     INITIAL_BALANCE=10
     
     if [[ "$TEST_MODE" == "true" ]]; then
@@ -227,6 +231,7 @@ echo "Token Name:        $TOKEN_NAME"
 echo "Token Symbol:      $TOKEN_SYMBOL"
 echo "Token Decimals:    $TOKEN_DECIMALS"
 echo "Total Supply:      $TOTAL_SUPPLY"
+echo "Initial Price:     $INITIAL_PRICE"
 echo "Dry Run:           $DRY_RUN"
 echo ""
 
@@ -310,7 +315,7 @@ run_cmd "$DEPLOY_CONTROLLER_CMD"
 
 # Step 2: Deploy token with signer as initial owner
 echo -e "${GREEN}=== Step 2: Deploy Token with Signer as Initial Owner ===${NC}"
-DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --initArgs '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS},\"latest_price\":\"0\"}' --networkId $NETWORK"
+DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --initArgs '{\"owner_id\":\"$SIGNER_ID\",\"total_supply\":\"$TOTAL_SUPPLY\",\"metadata\":{\"spec\":\"ft-1.0.0\",\"name\":\"$TOKEN_NAME\",\"symbol\":\"$TOKEN_SYMBOL\",\"decimals\":$TOKEN_DECIMALS},\"latest_price\":\"$INITIAL_PRICE\"}' --networkId $NETWORK"
 
 run_cmd "$DEPLOY_TOKEN_CMD"
 
