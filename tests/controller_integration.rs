@@ -1,8 +1,11 @@
+#[allow(dead_code)]
+pub mod common;
+
 use near_sdk::serde_json::json;
 use near_workspaces::types::NearToken;
 use std::path::PathBuf;
 
-const INITIAL_PRICE: u128 = 1612;
+use common::{production_metadata, INITIAL_PRICE, TOTAL_SUPPLY};
 
 /// Resolve wasm path - check CARGO_TARGET_DIR, fallback to ./target
 fn get_wasm_path(contract_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -35,14 +38,9 @@ async fn deploy_token(
         .call(token.id(), "new")
         .args_json(json!({
             "owner_id": token_owner_id,
-            "total_supply": "1000000000000000",
-            "metadata": {
-                "spec": "ft-1.0.0",
-                "name": "Test",
-                "symbol": "TEST",
-                "decimals": 24,
-            },
-            "latest_price": INITIAL_PRICE.to_string(),
+            "total_supply": TOTAL_SUPPLY,
+            "metadata": production_metadata(),
+            "latest_price": INITIAL_PRICE,
         }))
         .transact()
         .await?

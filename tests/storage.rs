@@ -2,11 +2,11 @@ pub mod common;
 
 use near_sdk::{json_types::U128, NearToken};
 
-use common::{init_accounts, init_contracts, ONE_YOCTO};
+use common::{init_accounts, init_contracts, ONE_YOCTO, TOTAL_SUPPLY};
 
 #[tokio::test]
 async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -54,7 +54,7 @@ async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -108,7 +108,7 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -218,7 +218,7 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn close_account_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -239,7 +239,7 @@ async fn close_account_empty_balance() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn close_account_non_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -271,7 +271,7 @@ async fn close_account_non_empty_balance() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn close_account_force_non_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;

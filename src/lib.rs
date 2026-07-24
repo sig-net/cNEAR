@@ -307,8 +307,11 @@ mod tests {
 
     use super::*;
 
-    const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000;
-    const INITIAL_PRICE: u128 = 1612;
+    // Production defaults — keep in sync with scripts/deploy.sh and tests/common.rs.
+    // 100 trillion tokens at 24 decimals (10^14 * 10^24 = 10^38 raw units).
+    const TOTAL_SUPPLY: Balance = 100_000_000_000_000_000_000_000_000_000_000_000_000;
+    // 1 NEAR per token, in yoctoNEAR.
+    const INITIAL_PRICE: u128 = 1_000_000_000_000_000_000_000_000;
 
     fn current() -> AccountId {
         accounts(0)
@@ -328,20 +331,20 @@ mod tests {
 
     fn setup() -> (Contract, VMContextBuilder) {
         let mut context = VMContextBuilder::new();
-        const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 288 288'%3E%3Cg id='l' data-name='l'%3E%3Cpath d='M187.58,79.81l-30.1,44.69a3.2,3.2,0,0,0,4.75,4.2L191.86,103a1.2,1.2,0,0,1,2,.91v80.46a1.2,1.2,0,0,1-2.12.77L102.18,77.93A15.35,15.35,0,0,0,90.47,72.5H87.34A15.34,15.34,0,0,0,72,87.84V201.16A15.34,15.34,0,0,0,87.34,216.5h0a15.35,15.35,0,0,0,13.08-7.31l30.1-44.69a3.2,3.2,0,0,0-4.75-4.2L96.14,186a1.2,1.2,0,0,1-2-.91V104.61a1.2,1.2,0,0,1,2.12-.77l89.55,107.23a15.35,15.35,0,0,0,11.71,5.43h3.13A15.34,15.34,0,0,0,216,201.16V87.84A15.34,15.34,0,0,0,200.66,72.5h0A15.35,15.35,0,0,0,187.58,79.81Z'/%3E%3C/g%3E%3C/svg%3E";
 
         context.current_account_id(current());
         context.predecessor_account_id(current());
         testing_env!(context.build());
 
+        // Metadata mirrors the scripts/deploy.sh defaults (which set no icon).
         let contract = Contract::new(
             owner(),
             TOTAL_SUPPLY.into(),
             FungibleTokenMetadata {
                 spec: FT_METADATA_SPEC.to_string(),
-                name: "Example NEAR fungible token".to_string(),
-                symbol: "EXAMPLE".to_string(),
-                icon: Some(DATA_IMAGE_SVG_NEAR_ICON.to_string()),
+                name: "cNEAR".to_string(),
+                symbol: "cNEAR".to_string(),
+                icon: None,
                 reference: None,
                 reference_hash: None,
                 decimals: 24,
@@ -369,7 +372,7 @@ mod tests {
         let (contract, _) = setup();
 
         assert_eq!(contract.ft_metadata().decimals, 24);
-        assert!(contract.ft_metadata().icon.is_some());
+        assert!(contract.ft_metadata().icon.is_none());
         assert!(!contract.ft_metadata().spec.is_empty());
         assert!(!contract.ft_metadata().name.is_empty());
         assert!(!contract.ft_metadata().symbol.is_empty());
