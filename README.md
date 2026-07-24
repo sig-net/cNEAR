@@ -3,7 +3,7 @@
 This is a fork of the NEAR example FT library.
 
 This is a standard FT contract that additionally:
-- Allows the owner to freeze/unfreeze accounts
+- Allows the owner to freeze/unfreeze accounts (freezing and pausing only restrict non-owner methods, so the owner can still e.g. force transfer out of a frozen account)
 - Allows the owner to force transfer out of accounts
 - Integrates with aurora-controller-factory for upgrades and access control
 - Uses near-plugins AccessControllable pattern for owner role management
@@ -12,7 +12,7 @@ This is a standard FT contract that additionally:
 
 - **Standard FT functionality** - Full NEP-141 fungible token implementation
 - **Pausable** - Owner can pause/unpause all token transfers
-- **Account freezing** - Owner can freeze individual accounts to prevent their transfers
+- **Account freezing** - Owner can freeze individual accounts to prevent their transfers; freezes and pauses only restrict non-owner methods, never the owner's
 - **Force transfers** - Owner can move tokens between any accounts
 - **Upgradeable** - Owner can upgrade contract code
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
@@ -176,6 +176,7 @@ near call <contract-account-id> force_ft_transfer '{"sender_id": "<from-account>
 near call <contract-account-id> set_latest_price '{"price": "1000000000000000000000000"}' --accountId <owner-account-id>
 
 # Transfer ownership (owner only)
+# WARNING: this does NOT revoke the old owner's ACL permissions — see "Security checklist" below
 near call <contract-account-id> owner_set '{"new_owner": "<new-owner-account-id>"}' --accountId <owner-account-id>
 ```
 
@@ -200,6 +201,65 @@ near call <controller-id> add_release_blob --accountId <dao-account> --amount 0.
 # 3. Upgrade token
 near call <controller-id> upgrade '{"contract_id": "<token-id>", "hash": "<wasm-sha256>"}' --accountId <dao-account> --amount 0.000000000000000000000001
 ```
+
+## Security checklist
+
+### `owner_set` does not revoke the old owner's super-admin permissions
+
+`owner_set` updates `owner_id` and grants the new owner the `Owner` role, but it only
+revokes the old owner's `Owner` *role*. The near-plugins ACL permissions granted at
+init / by `owner_set` — **super-admin** and **admin of the `Owner` role** — are separate
+permissions and are NOT removed. A super-admin can grant any role (including `Owner`)
+to any account at any time, so until you clean up, the old owner can fully re-instate
+themselves and the ownership transfer is not effective.
+
+After every ownership transfer, manually revoke the old owner's remaining permissions
+(these must be called by a current super-admin, e.g. the new owner):
+
+```bash
+# Check who currently holds super-admin
+near view <contract-account-id> acl_get_super_admins '{"skip": 0, "limit": 100}'
+
+# Revoke the old owner's super-admin permission
+near call <contract-account-id> acl_revoke_super_admin '{"account_id": "<old-owner-account-id>"}' --accountId <new-owner-account-id>
+
+# Revoke the old owner's admin permission over the Owner role
+near call <contract-account-id> acl_revoke_admin '{"role": "Owner", "account_id": "<old-owner-account-id>"}' --accountId <new-owner-account-id>
+
+# Verify: the super-admin list should contain exactly the current owner
+near view <contract-account-id> acl_get_super_admins '{"skip": 0, "limit": 100}'
+```
+
+The same applies to any super-admin added via `acl_add_super_admin`: super-admins are
+never removed implicitly, only by an explicit `acl_revoke_super_admin` /
+`acl_transfer_super_admin` call. Periodically audit `acl_get_super_admins` and
+`acl_get_admins` — the invariant you want is that the super-admin set is exactly
+`{owner_id}` (or empty once the controller owns the token).
+
+### Remove the full access key after deployment
+
+While the contract account still has a full access key (FAK), whoever holds that key
+can redeploy arbitrary contract code, drain the account, or delete it entirely —
+bypassing every on-chain control (ownership, ACL, pause, controller). The deployment
+flow leaves the deployer's FAK on the token and controller accounts.
+
+Once you are happy with a deployment and ownership has been transferred and verified,
+remove all access keys from the contract account:
+
+```bash
+# List the keys on the contract account
+near keys <contract-account-id>
+
+# Delete each full access key
+near delete-key <contract-account-id> '<public-key>' --accountId <contract-account-id>
+
+# Verify no keys remain
+near keys <contract-account-id>
+```
+
+This is irreversible: with no keys, the account can only be changed through the
+contract's own logic (e.g. the controller's release-management `upgrade` path), so
+confirm the upgrade path works before deleting the last key.
 
 ## Notes
 
