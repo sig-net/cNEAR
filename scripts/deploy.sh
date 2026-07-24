@@ -188,8 +188,8 @@ if [[ $ORIGINAL_ARGC -eq 0 && "$TEST_MODE" == "false" ]]; then
     read -p "Token account ID [token.$SIGNER_ID]: " TOKEN_ID
     TOKEN_ID=${TOKEN_ID:-"token.$SIGNER_ID"}
     
-    read -p "Token name [Controlled NEAR]: " TOKEN_NAME
-    TOKEN_NAME=${TOKEN_NAME:-"Controlled NEAR"}
+    read -p "Token name [cNEAR]: " TOKEN_NAME
+    TOKEN_NAME=${TOKEN_NAME:-"cNEAR"}
     
     read -p "Token symbol [cNEAR]: " TOKEN_SYMBOL
     TOKEN_SYMBOL=${TOKEN_SYMBOL:-"cNEAR"}
@@ -197,8 +197,9 @@ if [[ $ORIGINAL_ARGC -eq 0 && "$TEST_MODE" == "false" ]]; then
     read -p "Token decimals [24]: " TOKEN_DECIMALS
     TOKEN_DECIMALS=${TOKEN_DECIMALS:-24}
     
-    read -p "Total supply [1000000000000000]: " TOTAL_SUPPLY
-    TOTAL_SUPPLY=${TOTAL_SUPPLY:-"1000000000000000"}
+    # 100 trillion tokens at 24 decimals (10^14 * 10^24 = 10^38 raw units)
+    read -p "Total supply [100000000000000000000000000000000000000 (100 trillion)]: " TOTAL_SUPPLY
+    TOTAL_SUPPLY=${TOTAL_SUPPLY:-"100000000000000000000000000000000000000"}
 
     read -p "Initial price in yoctoNEAR [1000000000000000000000000 (1 NEAR)]: " INITIAL_PRICE
     INITIAL_PRICE=${INITIAL_PRICE:-"1000000000000000000000000"}
@@ -209,10 +210,11 @@ else
     # Use defaults for CLI mode and test mode
     CONTROLLER_ID="controller.$SIGNER_ID"
     TOKEN_ID="token.$SIGNER_ID"
-    TOKEN_NAME="Controlled NEAR"
+    TOKEN_NAME="cNEAR"
     TOKEN_SYMBOL="cNEAR"
     TOKEN_DECIMALS=24
-    TOTAL_SUPPLY="1000000000000000"
+    # 100 trillion tokens at 24 decimals (10^14 * 10^24 = 10^38 raw units)
+    TOTAL_SUPPLY="100000000000000000000000000000000000000"
     INITIAL_PRICE="1000000000000000000000000"
     INITIAL_BALANCE=10
     

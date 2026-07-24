@@ -127,7 +127,8 @@ cargo near create-account <contract-account-id> --useFaucet
 cargo near deploy <contract-account-id>
 
 # Initialize the contract (latest_price is in yoctoNEAR, ONE_NEAR = 10^24)
-near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "1000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 8 }, "latest_price": "1000000000000000000000000"}' --accountId <contract-account-id>
+# total_supply is in raw units: 10^38 = 100 trillion tokens at 24 decimals
+near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "100000000000000000000000000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 24 }, "latest_price": "1000000000000000000000000"}' --accountId <contract-account-id>
 ```
 
 ## Basic methods
