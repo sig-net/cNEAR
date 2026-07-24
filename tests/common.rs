@@ -7,11 +7,13 @@ use near_workspaces::{Account, Contract, DevNetwork, Worker};
 
 const INITIAL_BALANCE: NearToken = NearToken::from_near(30);
 
+pub const ONE_NEAR: u128 = NearToken::from_near(1).as_yoctonear();
+
 // Production defaults — keep in sync with scripts/deploy.sh.
 /// 100 trillion tokens at 24 decimals (10^14 * 10^24 = 10^38 raw units).
-pub const TOTAL_SUPPLY: U128 = U128(100_000_000_000_000_000_000_000_000_000_000_000_000);
+pub const TOTAL_SUPPLY: U128 = U128(100_000_000_000_000 * ONE_NEAR);
 /// 1 NEAR per token, in yoctoNEAR.
-pub const INITIAL_PRICE: U128 = U128(1_000_000_000_000_000_000_000_000);
+pub const INITIAL_PRICE: U128 = U128(ONE_NEAR);
 
 pub fn production_metadata() -> FungibleTokenMetadata {
     FungibleTokenMetadata {
