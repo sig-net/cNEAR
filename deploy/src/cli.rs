@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 pub const DEFAULT_TOKEN_WASM: &str = "target/near/fungible_token.wasm";
 pub const DEFAULT_CONTROLLER_WASM: &str = "target/near/aurora-controller-factory.wasm";
-pub const DEFAULT_GAS: u64 = 300_000_000_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Network {

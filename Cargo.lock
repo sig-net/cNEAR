@@ -628,6 +628,7 @@ dependencies = [
  "near-api",
  "near-api-types",
  "near-crypto 0.29.2",
+ "near-gas",
  "near-jsonrpc-client",
  "near-jsonrpc-primitives",
  "near-primitives 0.29.2",

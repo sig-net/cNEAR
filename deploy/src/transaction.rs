@@ -1,4 +1,4 @@
-use crate::cli::{Network, DEFAULT_GAS};
+use crate::cli::Network;
 use crate::credentials::{parse_account_id, Credentials};
 use crate::rpc::{access_key, block_hash, full_access};
 use anyhow::{anyhow, bail, Context, Result};
@@ -10,12 +10,13 @@ use near_api::types::transaction::actions::{
 };
 use near_api::types::{
     AccessKey as ApiAccessKey, AccessKeyPermission as ApiAccessKeyPermission,
-    AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash, NearGas,
+    AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash,
     PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
 };
 use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction};
 use near_api_types::transaction::result::TransactionResult as ApiTransactionResult;
 use near_crypto::{PublicKey, SecretKey};
+use near_gas::NearGas;
 use near_jsonrpc_client::JsonRpcClient;
 use near_jsonrpc_client::{
     errors::{JsonRpcError, JsonRpcServerError},
@@ -177,6 +178,8 @@ async fn make_transaction(
         .await
         .map_err(|error: ExecuteTransactionError| anyhow!("near-api signing failed: {error}"))
 }
+
+const DEFAULT_GAS: NearGas = NearGas::from_tgas(300);
 
 const TRANSACTION_STATUS_POLL_ATTEMPTS: usize = 30;
 const TRANSACTION_STATUS_POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -404,7 +407,7 @@ pub fn deploy_actions(wasm: Vec<u8>, method: Option<&str>, args: Value) -> Resul
         actions.push(ApiAction::FunctionCall(Box::new(FunctionCallAction {
             method_name: method.to_string(),
             args: serde_json::to_vec(&args).expect("deployment arguments are serializable"),
-            gas: NearGas::from_gas(DEFAULT_GAS),
+            gas: DEFAULT_GAS,
             deposit: NearToken::from_yoctonear(0),
         })));
     }
@@ -415,7 +418,7 @@ pub fn call_action(method: &str, args: Value, deposit: u128) -> ApiAction {
     ApiAction::FunctionCall(Box::new(FunctionCallAction {
         method_name: method.to_string(),
         args: serde_json::to_vec(&args).expect("call arguments are serializable"),
-        gas: NearGas::from_gas(DEFAULT_GAS),
+        gas: DEFAULT_GAS,
         deposit: NearToken::from_yoctonear(deposit),
     }))
 }
