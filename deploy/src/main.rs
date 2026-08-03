@@ -21,6 +21,7 @@ use near_primitives::views::{FinalExecutionStatus, TxExecutionStatus};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -154,6 +155,91 @@ struct AccountView {
 struct AccessKeyView {
     nonce: Nonce,
     permission: AccessKeyPermission,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct NonceKey {
+    account_id: AccountId,
+    public_key: String,
+}
+
+#[derive(Default, Debug)]
+struct NonceTracker {
+    // Stores the next nonce to use, keyed by the exact signing account/key pair.
+    next_nonces: HashMap<NonceKey, Nonce>,
+}
+
+impl NonceTracker {
+    fn key(credentials: &Credentials) -> NonceKey {
+        NonceKey {
+            account_id: credentials.account_id.clone(),
+            public_key: credentials.secret_key.public_key().to_string(),
+        }
+    }
+
+    fn next_after(nonce: Nonce) -> Result<Nonce> {
+        nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("transaction nonce overflow"))
+    }
+
+    fn merge_rpc_nonce(&mut self, credentials: &Credentials, rpc_nonce: Nonce) -> Result<Nonce> {
+        let next_nonce = Self::next_after(rpc_nonce)?;
+        let entry = self
+            .next_nonces
+            .entry(Self::key(credentials))
+            .or_insert(next_nonce);
+        if *entry < next_nonce {
+            *entry = next_nonce;
+        }
+        Ok(*entry)
+    }
+
+    async fn next_nonce(
+        &mut self,
+        client: &JsonRpcClient,
+        credentials: &Credentials,
+    ) -> Result<Nonce> {
+        let key = Self::key(credentials);
+        if let Some(nonce) = self.next_nonces.get(&key).copied() {
+            return Ok(nonce);
+        }
+        let access_key = access_key(
+            client,
+            BlockReference::Finality(near_primitives::types::Finality::Final),
+            credentials,
+        )
+        .await?;
+        if !full_access(&access_key.permission) {
+            bail!("signer access key is not full access");
+        }
+        self.merge_rpc_nonce(credentials, access_key.nonce)
+    }
+
+    fn confirmed(&mut self, credentials: &Credentials, used_nonce: Nonce) -> Result<()> {
+        self.merge_rpc_nonce(credentials, used_nonce).map(|_| ())
+    }
+
+    async fn refresh(
+        &mut self,
+        client: &JsonRpcClient,
+        credentials: &Credentials,
+    ) -> Result<Nonce> {
+        let access_key = access_key(
+            client,
+            BlockReference::Finality(near_primitives::types::Finality::Final),
+            credentials,
+        )
+        .await?;
+        if !full_access(&access_key.permission) {
+            bail!("signer access key is not full access");
+        }
+        self.merge_rpc_nonce(credentials, access_key.nonce)
+    }
+
+    fn invalidate(&mut self, credentials: &Credentials) {
+        self.next_nonces.remove(&Self::key(credentials));
+    }
 }
 
 fn parse_account_id(value: &str, field: &str) -> Result<AccountId> {
@@ -612,7 +698,15 @@ async fn reconcile_transaction(
     bail!("transaction {tx_hash} remains unresolved after broadcast; refusing to resubmit it")
 }
 
-async fn submit(client: &JsonRpcClient, signed_transaction: SignedTransaction) -> Result<()> {
+#[derive(Debug, Eq, PartialEq)]
+struct SubmissionOutcome {
+    was_ambiguous: bool,
+}
+
+async fn submit(
+    client: &JsonRpcClient,
+    signed_transaction: SignedTransaction,
+) -> Result<SubmissionOutcome> {
     // Compute and retain the identity before broadcast. A transport timeout does not tell us
     // whether the node accepted the transaction, so the exact same hash must be queried rather
     // than submitting a newly signed transaction with a potentially conflicting nonce.
@@ -627,20 +721,33 @@ async fn submit(client: &JsonRpcClient, signed_transaction: SignedTransaction) -
 
     match response {
         Ok(Ok(outcome)) => match classify_transaction_status(&outcome.status)? {
-            TransactionStatus::Succeeded => Ok(()),
-            TransactionStatus::Pending => reconcile_transaction(client, tx_hash, signer_id).await,
+            TransactionStatus::Succeeded => Ok(SubmissionOutcome {
+                was_ambiguous: false,
+            }),
+            TransactionStatus::Pending => {
+                reconcile_transaction(client, tx_hash, signer_id).await?;
+                Ok(SubmissionOutcome {
+                    was_ambiguous: true,
+                })
+            }
         },
         Err(_) => {
             eprintln!(
                 "broadcast timed out for transaction {tx_hash}; querying status before deciding"
             );
-            reconcile_transaction(client, tx_hash, signer_id).await
+            reconcile_transaction(client, tx_hash, signer_id).await?;
+            Ok(SubmissionOutcome {
+                was_ambiguous: true,
+            })
         }
         Ok(Err(error)) if is_ambiguous_submission_error(&error) => {
             eprintln!(
                 "broadcast response for transaction {tx_hash} was ambiguous; querying status before deciding"
             );
-            reconcile_transaction(client, tx_hash, signer_id).await
+            reconcile_transaction(client, tx_hash, signer_id).await?;
+            Ok(SubmissionOutcome {
+                was_ambiguous: true,
+            })
         }
         Ok(Err(error)) => Err(anyhow!("transaction {tx_hash} submission failed: {error}")),
     }
@@ -691,24 +798,29 @@ async fn send_actions(
     signer: &Credentials,
     receiver: AccountId,
     actions: Vec<Action>,
+    nonce_tracker: &mut NonceTracker,
 ) -> Result<()> {
-    let key = access_key(
-        client,
-        BlockReference::Finality(near_primitives::types::Finality::Final),
-        signer,
-    )
-    .await?;
-    if !full_access(&key.permission) {
-        bail!("signer access key is not full access");
+    let nonce = nonce_tracker.next_nonce(client, signer).await?;
+    let tx = make_transaction(signer, receiver, nonce, block_hash(client).await?, actions);
+    match submit(client, tx).await {
+        Ok(outcome) => {
+            // Only advance after the original transaction has been confirmed. A lagging RPC
+            // replica may still report the previous access-key nonce at this point.
+            nonce_tracker.confirmed(signer, nonce)?;
+            if outcome.was_ambiguous {
+                // Reconcile the local value with RPC after an ambiguous broadcast. merge_rpc_nonce
+                // retains the locally confirmed value if the replica is behind.
+                nonce_tracker.refresh(client, signer).await?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            // The transaction may have been accepted even when reconciliation failed. Never use
+            // the cached nonce for another transaction until it has been recovered from RPC.
+            nonce_tracker.invalidate(signer);
+            Err(error)
+        }
     }
-    let tx = make_transaction(
-        signer,
-        receiver,
-        key.nonce + 1,
-        block_hash(client).await?,
-        actions,
-    );
-    submit(client, tx).await
 }
 
 fn persist_generated_credentials(
@@ -750,6 +862,7 @@ async fn ensure_account(
     config: &DeploymentConfig,
     snapshot: RpcSnapshot,
     account_id: &AccountId,
+    nonce_tracker: &mut NonceTracker,
 ) -> Result<AccountHandle> {
     let path = credentials_dir(config.network)?.join(format!("{account_id}.json"));
     if let Some(state) = account(client, snapshot.block_reference(), account_id).await? {
@@ -787,6 +900,7 @@ async fn ensure_account(
         &config.signer,
         account_id.clone(),
         create_account_actions(config.initial_balance, credentials.secret_key.public_key()),
+        nonce_tracker,
     )
     .await
     {
@@ -806,6 +920,7 @@ async fn cleanup_accounts(
     config: &DeploymentConfig,
     token: Option<&AccountHandle>,
     controller: Option<&AccountHandle>,
+    nonce_tracker: &mut NonceTracker,
 ) -> Result<()> {
     let mut first_error = None;
     for handle in [token, controller].into_iter().flatten() {
@@ -817,6 +932,7 @@ async fn cleanup_accounts(
             &handle.credentials,
             handle.credentials.account_id.clone(),
             vec![delete_action(config.signer.account_id.clone())],
+            nonce_tracker,
         )
         .await
         {
@@ -879,10 +995,25 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
     }
     let mut controller_account = None;
     let mut token_account = None;
+    let mut nonce_tracker = NonceTracker::default();
     let deployment = async {
-        let controller = ensure_account(&client, config, snapshot, &config.controller_id).await?;
+        let controller = ensure_account(
+            &client,
+            config,
+            snapshot,
+            &config.controller_id,
+            &mut nonce_tracker,
+        )
+        .await?;
         controller_account = Some(controller);
-        let token = ensure_account(&client, config, snapshot, &config.token_id).await?;
+        let token = ensure_account(
+            &client,
+            config,
+            snapshot,
+            &config.token_id,
+            &mut nonce_tracker,
+        )
+        .await?;
         token_account = Some(token);
         let controller_credentials = &controller_account
             .as_ref()
@@ -905,6 +1036,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     .then_some("new"),
                 json!({ "dao": config.signer.account_id }),
             ),
+            &mut nonce_tracker,
         )
         .await?;
         send_actions(
@@ -925,6 +1057,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     "latest_price": config.initial_price.to_string(),
                 }),
             ),
+            &mut nonce_tracker,
         )
         .await?;
         if token_account
@@ -941,6 +1074,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     json!({ "new_owner": config.controller_id }),
                     1,
                 )],
+                &mut nonce_tracker,
             )
             .await?;
         }
@@ -953,6 +1087,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                 config,
                 token_account.as_ref(),
                 controller_account.as_ref(),
+                &mut nonce_tracker,
             )
             .await
             {
@@ -967,6 +1102,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
             config,
             token_account.as_ref(),
             controller_account.as_ref(),
+            &mut nonce_tracker,
         )
         .await?;
     }
@@ -1125,6 +1261,28 @@ mod tests {
             snapshot.block_reference(),
             BlockReference::BlockId(BlockId::Hash(hash))
         );
+    }
+
+    #[test]
+    fn nonce_tracker_reuses_and_advances_local_nonce() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "nonce-tracker-test");
+        let credentials = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let mut tracker = NonceTracker::default();
+
+        assert_eq!(tracker.merge_rpc_nonce(&credentials, 7).unwrap(), 8);
+        assert_eq!(tracker.next_nonces.len(), 1);
+        assert_eq!(tracker.next_nonces.values().copied().next(), Some(8));
+        assert_eq!(tracker.merge_rpc_nonce(&credentials, 7).unwrap(), 8);
+        tracker.confirmed(&credentials, 8).unwrap();
+        assert_eq!(tracker.next_nonces.values().copied().next(), Some(9));
+
+        // A stale RPC value must not move the local next nonce backwards.
+        assert_eq!(tracker.merge_rpc_nonce(&credentials, 7).unwrap(), 9);
+        tracker.invalidate(&credentials);
+        assert!(tracker.next_nonces.is_empty());
     }
 
     #[test]
