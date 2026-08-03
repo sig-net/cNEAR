@@ -8,6 +8,8 @@ publish = false
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
+near-api = "=0.8.6"
+near-api-types = "=0.8.6"
 near-crypto = "0.29.2"
 near-jsonrpc-client = "0.16.1"
 near-jsonrpc-primitives = "0.29.2"

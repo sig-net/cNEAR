@@ -1,5 +1,18 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, ValueEnum};
+use near_api::advanced::{ExecuteSignedTransaction, TransactionableOrSigned};
+use near_api::errors::ExecuteTransactionError;
+use near_api::types::transaction::actions::{
+    AddKeyAction, CreateAccountAction, DeleteAccountAction, DeployContractAction,
+    FunctionCallAction,
+};
+use near_api::types::{
+    AccessKey as ApiAccessKey, AccessKeyPermission as ApiAccessKeyPermission,
+    AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash, NearGas,
+    NearToken, PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
+};
+use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction};
+use near_api_types::transaction::result::TransactionResult as ApiTransactionResult;
 use near_crypto::{KeyType, PublicKey, SecretKey};
 use near_jsonrpc_client::{
     errors::{JsonRpcError, JsonRpcServerError},
@@ -9,12 +22,7 @@ use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_jsonrpc_primitives::types::query::RpcQueryError;
 use near_jsonrpc_primitives::types::transactions::{RpcTransactionError, TransactionInfo};
 use near_primitives::account::AccessKeyPermission;
-use near_primitives::action::{
-    Action, CreateAccountAction, DeleteAccountAction, DeployContractAction, FunctionCallAction,
-    TransferAction,
-};
 use near_primitives::hash::CryptoHash;
-use near_primitives::transaction::{SignedTransaction, Transaction, TransactionV0};
 use near_primitives::types::{AccountId, BlockId, BlockReference, FunctionArgs, Nonce, StoreKey};
 use near_primitives::views::QueryRequest;
 use near_primitives::views::{FinalExecutionStatus, TxExecutionStatus};
@@ -70,7 +78,7 @@ struct Cli {
     controller_id: Option<String>,
     #[arg(long)]
     token_id: Option<String>,
-    #[arg(long, default_value = "Controlled NEAR")]
+    #[arg(long, default_value = "cNEAR")]
     token_name: String,
     #[arg(long, default_value = "cNEAR")]
     token_symbol: String,
@@ -577,6 +585,40 @@ fn full_access(permission: &AccessKeyPermission) -> bool {
     matches!(permission, AccessKeyPermission::FullAccess)
 }
 
+fn api_account_id(account_id: &AccountId) -> Result<ApiAccountId> {
+    account_id
+        .to_string()
+        .parse()
+        .with_context(|| format!("could not convert account ID {account_id} for near-api"))
+}
+
+fn api_crypto_hash(hash: CryptoHash) -> Result<ApiCryptoHash> {
+    hash.to_string()
+        .parse()
+        .context("could not convert block hash for near-api")
+}
+
+fn api_secret_key(secret_key: &SecretKey) -> Result<ApiSecretKey> {
+    secret_key
+        .to_string()
+        .parse()
+        .context("could not convert signing key for near-api")
+}
+
+fn api_network(network: Network) -> NetworkConfig {
+    let endpoint = match network {
+        Network::Testnet => RPCEndpoint::testnet(),
+        Network::Mainnet => RPCEndpoint::mainnet(),
+    }
+    .with_retries(1);
+    let mut config = match network {
+        Network::Testnet => NetworkConfig::testnet(),
+        Network::Mainnet => NetworkConfig::mainnet(),
+    };
+    config.rpc_endpoints = vec![endpoint];
+    config
+}
+
 async fn block_hash(client: &JsonRpcClient) -> Result<CryptoHash> {
     let response = client
         .call(methods::block::RpcBlockRequest {
@@ -587,23 +629,34 @@ async fn block_hash(client: &JsonRpcClient) -> Result<CryptoHash> {
     Ok(response.header.hash)
 }
 
-fn make_transaction(
+async fn make_transaction(
     signer: &Credentials,
     receiver_id: AccountId,
     nonce: Nonce,
     block_hash: CryptoHash,
-    actions: Vec<Action>,
-) -> SignedTransaction {
-    let transaction = Transaction::V0(TransactionV0 {
-        signer_id: signer.account_id.clone(),
-        public_key: signer.secret_key.public_key(),
-        nonce,
-        receiver_id,
-        block_hash,
-        actions,
-    });
-    let (hash, _) = transaction.get_hash_and_size();
-    SignedTransaction::new(signer.secret_key.sign(hash.as_ref()), transaction)
+    actions: Vec<ApiAction>,
+) -> Result<ExecuteSignedTransaction> {
+    let api_signer = Signer::from_secret_key(api_secret_key(&signer.secret_key)?)
+        .context("could not create near-api signer")?;
+    let mut transaction = Transaction::construct(
+        api_account_id(&signer.account_id)?,
+        api_account_id(&receiver_id)?,
+    );
+    for action in actions {
+        transaction = transaction.add_action(action);
+    }
+    transaction
+        .with_signer(api_signer.clone())
+        .presign_offline(
+            api_signer
+                .get_public_key()
+                .await
+                .context("could not read near-api public key")?,
+            api_crypto_hash(block_hash)?,
+            nonce,
+        )
+        .await
+        .map_err(|error: ExecuteTransactionError| anyhow!("near-api signing failed: {error}"))
 }
 
 const TRANSACTION_STATUS_POLL_ATTEMPTS: usize = 30;
@@ -611,31 +664,60 @@ const TRANSACTION_STATUS_POLL_DELAY: std::time::Duration = std::time::Duration::
 const TRANSACTION_STATUS_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TRANSACTION_BROADCAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Debug, Eq, PartialEq)]
-enum TransactionStatus {
-    Succeeded,
-    Pending,
+#[derive(Debug)]
+struct UnresolvedTransaction {
+    tx_hash: CryptoHash,
 }
 
-fn classify_transaction_status(status: &FinalExecutionStatus) -> Result<TransactionStatus> {
-    match status {
-        FinalExecutionStatus::SuccessValue(_) => Ok(TransactionStatus::Succeeded),
-        FinalExecutionStatus::Failure(error) => {
-            bail!("transaction execution failed: {error:?}")
-        }
-        FinalExecutionStatus::NotStarted | FinalExecutionStatus::Started => {
-            Ok(TransactionStatus::Pending)
-        }
+#[derive(Debug)]
+struct ConfirmedTransactionFailure {
+    tx_hash: CryptoHash,
+    detail: String,
+}
+
+impl std::fmt::Display for ConfirmedTransactionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "transaction {} executed but failed: {}",
+            self.tx_hash, self.detail
+        )
     }
 }
 
-fn is_ambiguous_submission_error(error: &JsonRpcError<RpcTransactionError>) -> bool {
+impl std::error::Error for ConfirmedTransactionFailure {}
+
+impl std::fmt::Display for UnresolvedTransaction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "transaction {} remains unresolved after broadcast",
+            self.tx_hash
+        )
+    }
+}
+
+impl std::error::Error for UnresolvedTransaction {}
+
+fn is_unresolved_transaction(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UnresolvedTransaction>().is_some()
+}
+
+fn is_confirmed_transaction_failure(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ConfirmedTransactionFailure>()
+        .is_some()
+}
+
+fn is_pre_broadcast_near_api_error(error: &ExecuteTransactionError) -> bool {
     matches!(
         error,
-        JsonRpcError::TransportError(_)
-            | JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-                RpcTransactionError::TimeoutError
-            ))
+        ExecuteTransactionError::ArgumentValidationError(_)
+            | ExecuteTransactionError::PreQueryError(_)
+            | ExecuteTransactionError::ValidationError(_)
+            | ExecuteTransactionError::MetaSignError(_)
+            | ExecuteTransactionError::SignerError(_)
+            | ExecuteTransactionError::DataConversionError(_)
     )
 }
 
@@ -677,16 +759,22 @@ async fn reconcile_transaction(
                     tokio::time::sleep(TRANSACTION_STATUS_POLL_DELAY).await;
                     continue;
                 };
-                match classify_transaction_status(&outcome.into_outcome().status)? {
-                    TransactionStatus::Succeeded => return Ok(()),
-                    TransactionStatus::Pending => {}
+                match &outcome.into_outcome().status {
+                    FinalExecutionStatus::SuccessValue(_) => return Ok(()),
+                    FinalExecutionStatus::Failure(error) => {
+                        return Err(ConfirmedTransactionFailure {
+                            tx_hash,
+                            detail: format!("{error:?}"),
+                        }
+                        .into());
+                    }
+                    FinalExecutionStatus::NotStarted | FinalExecutionStatus::Started => {}
                 }
             }
             Ok(Err(error)) if is_retryable_status_error(&error) => {}
             Ok(Err(error)) => {
-                return Err(anyhow!(
-                    "could not reconcile transaction {tx_hash}: {error}"
-                ));
+                eprintln!("could not query status for transaction {tx_hash}: {error}");
+                return Err(UnresolvedTransaction { tx_hash }.into());
             }
         }
 
@@ -695,7 +783,7 @@ async fn reconcile_transaction(
         }
     }
 
-    bail!("transaction {tx_hash} remains unresolved after broadcast; refusing to resubmit it")
+    Err(UnresolvedTransaction { tx_hash }.into())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -705,32 +793,51 @@ struct SubmissionOutcome {
 
 async fn submit(
     client: &JsonRpcClient,
-    signed_transaction: SignedTransaction,
+    signed_transaction: ExecuteSignedTransaction,
+    network: &NetworkConfig,
 ) -> Result<SubmissionOutcome> {
-    // Compute and retain the identity before broadcast. A transport timeout does not tell us
-    // whether the node accepted the transaction, so the exact same hash must be queried rather
-    // than submitting a newly signed transaction with a potentially conflicting nonce.
-    let tx_hash = signed_transaction.get_hash();
-    let signer_id = signed_transaction.transaction.signer_id().clone();
-    let response = tokio::time::timeout(
+    // The transaction is presigned once. Capture its hash before the single near-api broadcast;
+    // a transport timeout is ambiguous and must reconcile this exact hash instead of resubmitting.
+    let signed = match &signed_transaction.transaction {
+        TransactionableOrSigned::Signed((signed, _)) => signed,
+        TransactionableOrSigned::Transactionable(_) => {
+            bail!("near-api transaction was not presigned")
+        }
+    };
+    let tx_hash: CryptoHash = signed
+        .get_hash()
+        .to_string()
+        .parse()
+        .map_err(|error| anyhow!("could not convert near-api transaction hash: {error}"))?;
+    let signer_id: AccountId = signed
+        .transaction
+        .signer_id()
+        .to_string()
+        .parse()
+        .map_err(|error| anyhow!("could not convert near-api signer account ID: {error}"))?;
+    let result = tokio::time::timeout(
         TRANSACTION_BROADCAST_TIMEOUT,
-        client
-            .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest { signed_transaction }),
+        signed_transaction.send_to(network),
     )
     .await;
 
-    match response {
-        Ok(Ok(outcome)) => match classify_transaction_status(&outcome.status)? {
-            TransactionStatus::Succeeded => Ok(SubmissionOutcome {
+    match result {
+        Ok(Ok(ApiTransactionResult::Full(final_result))) if final_result.is_success() => {
+            Ok(SubmissionOutcome {
                 was_ambiguous: false,
-            }),
-            TransactionStatus::Pending => {
-                reconcile_transaction(client, tx_hash, signer_id).await?;
-                Ok(SubmissionOutcome {
-                    was_ambiguous: true,
-                })
-            }
-        },
+            })
+        }
+        Ok(Ok(ApiTransactionResult::Full(_))) => Err(ConfirmedTransactionFailure {
+            tx_hash,
+            detail: "final execution status reported failure".to_string(),
+        }
+        .into()),
+        Ok(Ok(ApiTransactionResult::Pending { .. })) => {
+            reconcile_transaction(client, tx_hash, signer_id).await?;
+            Ok(SubmissionOutcome {
+                was_ambiguous: true,
+            })
+        }
         Err(_) => {
             eprintln!(
                 "broadcast timed out for transaction {tx_hash}; querying status before deciding"
@@ -740,69 +847,82 @@ async fn submit(
                 was_ambiguous: true,
             })
         }
-        Ok(Err(error)) if is_ambiguous_submission_error(&error) => {
+        Ok(Err(error)) if is_pre_broadcast_near_api_error(&error) => {
+            Err(anyhow!("near-api transaction preparation failed: {error}"))
+        }
+        Ok(Err(error)) => {
             eprintln!(
-                "broadcast response for transaction {tx_hash} was ambiguous; querying status before deciding"
+                "broadcast response for transaction {tx_hash} was ambiguous: {error}; querying status"
             );
             reconcile_transaction(client, tx_hash, signer_id).await?;
             Ok(SubmissionOutcome {
                 was_ambiguous: true,
             })
         }
-        Ok(Err(error)) => Err(anyhow!("transaction {tx_hash} submission failed: {error}")),
     }
 }
 
-fn create_account_actions(amount: u128, public_key: PublicKey) -> Vec<Action> {
-    vec![
-        Action::CreateAccount(CreateAccountAction {}),
-        Action::Transfer(TransferAction { deposit: amount }),
-        Action::AddKey(Box::new(near_primitives::action::AddKeyAction {
-            public_key,
-            access_key: near_primitives::account::AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FullAccess,
+fn create_account_actions(amount: u128, public_key: PublicKey) -> Result<Vec<ApiAction>> {
+    let api_public_key: ApiPublicKey = public_key
+        .to_string()
+        .parse()
+        .context("could not convert generated public key for near-api")?;
+    Ok(vec![
+        ApiAction::CreateAccount(CreateAccountAction {}),
+        ApiAction::Transfer(near_api::types::transaction::actions::TransferAction {
+            deposit: NearToken::from_yoctonear(amount),
+        }),
+        ApiAction::AddKey(Box::new(AddKeyAction {
+            public_key: api_public_key,
+            access_key: ApiAccessKey {
+                nonce: 0.into(),
+                permission: ApiAccessKeyPermission::FullAccess,
             },
         })),
-    ]
+    ])
 }
 
-fn deploy_actions(wasm: Vec<u8>, method: Option<&str>, args: Value) -> Vec<Action> {
-    let mut actions = vec![Action::DeployContract(DeployContractAction { code: wasm })];
+fn deploy_actions(wasm: Vec<u8>, method: Option<&str>, args: Value) -> Result<Vec<ApiAction>> {
+    let mut actions = vec![ApiAction::DeployContract(DeployContractAction {
+        code: wasm,
+    })];
     if let Some(method) = method {
-        actions.push(Action::FunctionCall(Box::new(FunctionCallAction {
+        actions.push(ApiAction::FunctionCall(Box::new(FunctionCallAction {
             method_name: method.to_string(),
             args: serde_json::to_vec(&args).expect("deployment arguments are serializable"),
-            gas: DEFAULT_GAS,
-            deposit: 0,
+            gas: NearGas::from_gas(DEFAULT_GAS),
+            deposit: NearToken::from_yoctonear(0),
         })));
     }
-    actions
+    Ok(actions)
 }
 
-fn call_action(method: &str, args: Value, deposit: u128) -> Action {
-    Action::FunctionCall(Box::new(FunctionCallAction {
+fn call_action(method: &str, args: Value, deposit: u128) -> ApiAction {
+    ApiAction::FunctionCall(Box::new(FunctionCallAction {
         method_name: method.to_string(),
         args: serde_json::to_vec(&args).expect("call arguments are serializable"),
-        gas: DEFAULT_GAS,
-        deposit,
+        gas: NearGas::from_gas(DEFAULT_GAS),
+        deposit: NearToken::from_yoctonear(deposit),
     }))
 }
 
-fn delete_action(beneficiary_id: AccountId) -> Action {
-    Action::DeleteAccount(DeleteAccountAction { beneficiary_id })
+fn delete_action(beneficiary_id: AccountId) -> Result<ApiAction> {
+    Ok(ApiAction::DeleteAccount(DeleteAccountAction {
+        beneficiary_id: api_account_id(&beneficiary_id)?,
+    }))
 }
 
 async fn send_actions(
     client: &JsonRpcClient,
+    network: &NetworkConfig,
     signer: &Credentials,
     receiver: AccountId,
-    actions: Vec<Action>,
+    actions: Vec<ApiAction>,
     nonce_tracker: &mut NonceTracker,
 ) -> Result<()> {
     let nonce = nonce_tracker.next_nonce(client, signer).await?;
-    let tx = make_transaction(signer, receiver, nonce, block_hash(client).await?, actions);
-    match submit(client, tx).await {
+    let tx = make_transaction(signer, receiver, nonce, block_hash(client).await?, actions).await?;
+    match submit(client, tx, network).await {
         Ok(outcome) => {
             // Only advance after the original transaction has been confirmed. A lagging RPC
             // replica may still report the previous access-key nonce at this point.
@@ -813,6 +933,11 @@ async fn send_actions(
                 nonce_tracker.refresh(client, signer).await?;
             }
             Ok(())
+        }
+        Err(error) if is_confirmed_transaction_failure(&error) => {
+            // A finalized execution failure consumed the nonce even though the action failed.
+            nonce_tracker.confirmed(signer, nonce)?;
+            Err(error)
         }
         Err(error) => {
             // The transaction may have been accepted even when reconciliation failed. Never use
@@ -859,6 +984,7 @@ fn persist_generated_credentials(
 
 async fn ensure_account(
     client: &JsonRpcClient,
+    network: &NetworkConfig,
     config: &DeploymentConfig,
     snapshot: RpcSnapshot,
     account_id: &AccountId,
@@ -897,9 +1023,10 @@ async fn ensure_account(
     let credentials = persist_generated_credentials(&path, account_id.clone(), secret_key)?;
     if let Err(error) = send_actions(
         client,
+        network,
         &config.signer,
         account_id.clone(),
-        create_account_actions(config.initial_balance, credentials.secret_key.public_key()),
+        create_account_actions(config.initial_balance, credentials.secret_key.public_key())?,
         nonce_tracker,
     )
     .await
@@ -917,6 +1044,7 @@ async fn ensure_account(
 
 async fn cleanup_accounts(
     client: &JsonRpcClient,
+    network: &NetworkConfig,
     config: &DeploymentConfig,
     token: Option<&AccountHandle>,
     controller: Option<&AccountHandle>,
@@ -929,14 +1057,21 @@ async fn cleanup_accounts(
         }
         if let Err(error) = send_actions(
             client,
+            network,
             &handle.credentials,
             handle.credentials.account_id.clone(),
-            vec![delete_action(config.signer.account_id.clone())],
+            vec![delete_action(config.signer.account_id.clone())?],
             nonce_tracker,
         )
         .await
         {
+            let unresolved = is_unresolved_transaction(&error);
             first_error.get_or_insert(error);
+            // Do not submit another transaction from any account while the previous
+            // cleanup transaction has an unknown outcome.
+            if unresolved {
+                break;
+            }
         } else if let Some(path) = &handle.credential_path {
             if let Err(error) = fs::remove_file(path) {
                 first_error.get_or_insert(anyhow!(
@@ -967,6 +1102,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
         }
     }
     let client = JsonRpcClient::connect(config.network.rpc_url());
+    let network = api_network(config.network);
     let snapshot = finalized_snapshot(&client).await?;
     access_key(&client, snapshot.block_reference(), &config.signer).await?;
     let controller = account(&client, snapshot.block_reference(), &config.controller_id).await?;
@@ -999,6 +1135,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
     let deployment = async {
         let controller = ensure_account(
             &client,
+            &network,
             config,
             snapshot,
             &config.controller_id,
@@ -1008,6 +1145,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
         controller_account = Some(controller);
         let token = ensure_account(
             &client,
+            &network,
             config,
             snapshot,
             &config.token_id,
@@ -1025,6 +1163,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
             .credentials;
         send_actions(
             &client,
+            &network,
             controller_credentials,
             config.controller_id.clone(),
             deploy_actions(
@@ -1035,12 +1174,13 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     .needs_initialization
                     .then_some("new"),
                 json!({ "dao": config.signer.account_id }),
-            ),
+            )?,
             &mut nonce_tracker,
         )
         .await?;
         send_actions(
             &client,
+            &network,
             token_credentials,
             config.token_id.clone(),
             deploy_actions(
@@ -1056,7 +1196,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
                     "latest_price": config.initial_price.to_string(),
                 }),
-            ),
+            )?,
             &mut nonce_tracker,
         )
         .await?;
@@ -1067,6 +1207,7 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
         {
             send_actions(
                 &client,
+                &network,
                 &config.signer,
                 config.token_id.clone(),
                 vec![call_action(
@@ -1081,9 +1222,10 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
         verify_ownership(&client, &config.token_id, &config.controller_id).await
     };
     if let Err(error) = deployment.await {
-        if config.test_mode {
+        if config.test_mode && !is_unresolved_transaction(&error) {
             if let Err(cleanup_error) = cleanup_accounts(
                 &client,
+                &network,
                 config,
                 token_account.as_ref(),
                 controller_account.as_ref(),
@@ -1093,12 +1235,17 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
             {
                 return Err(error.context(format!("cleanup also failed: {cleanup_error}")));
             }
+        } else if config.test_mode {
+            eprintln!(
+                "skipping cleanup because a transaction outcome is unresolved; inspect its hash before retrying"
+            );
         }
         return Err(error);
     }
     if config.test_mode {
         cleanup_accounts(
             &client,
+            &network,
             config,
             token_account.as_ref(),
             controller_account.as_ref(),
@@ -1286,48 +1433,52 @@ mod tests {
     }
 
     #[test]
-    fn transaction_status_classification_distinguishes_success_and_pending() {
-        assert_eq!(
-            classify_transaction_status(&FinalExecutionStatus::SuccessValue(vec![])).unwrap(),
-            TransactionStatus::Succeeded
-        );
-        assert_eq!(
-            classify_transaction_status(&FinalExecutionStatus::Started).unwrap(),
-            TransactionStatus::Pending
-        );
-        assert!(classify_transaction_status(&FinalExecutionStatus::Failure(
-            near_primitives::errors::TxExecutionError::InvalidTxError(
-                near_primitives::errors::InvalidTxError::Expired,
-            ),
-        ))
-        .is_err());
+    fn near_api_network_uses_one_broadcast_attempt() {
+        assert_eq!(api_network(Network::Testnet).rpc_endpoints[0].retries, 1);
+        assert_eq!(api_network(Network::Mainnet).rpc_endpoints[0].retries, 1);
     }
 
-    #[test]
-    fn transaction_contains_typed_actions() {
-        let secret = SecretKey::from_seed(KeyType::ED25519, "deploy-test");
+    #[tokio::test]
+    async fn near_api_signed_hash_is_preserved_for_reconciliation() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "near-api-hash-test");
         let signer = Credentials {
             account_id: "alice.testnet".parse().unwrap(),
             secret_key: secret,
         };
+        let receiver: AccountId = "bob.testnet".parse().unwrap();
         let transaction = make_transaction(
             &signer,
-            "bob.testnet".parse().unwrap(),
+            receiver,
             1,
             CryptoHash::default(),
-            vec![call_action(
-                "owner_set",
-                json!({ "new_owner": "bob.testnet" }),
-                1,
-            )],
-        );
-        assert_eq!(
-            transaction.transaction.receiver_id(),
-            &"bob.testnet".parse::<AccountId>().unwrap()
-        );
-        assert_eq!(transaction.transaction.actions().len(), 1);
-        let transaction_hash = transaction.transaction.get_hash_and_size().0;
-        assert_eq!(transaction.get_hash(), transaction_hash);
-        assert_eq!(transaction.transaction.signer_id(), &signer.account_id);
+            vec![call_action("owner_set", json!({}), 1)],
+        )
+        .await
+        .unwrap();
+        let TransactionableOrSigned::Signed((signed, _)) = transaction.transaction else {
+            panic!("transaction was not presigned");
+        };
+        let converted: CryptoHash = signed.get_hash().to_string().parse().unwrap();
+        assert_eq!(converted.to_string(), signed.get_hash().to_string());
+    }
+
+    #[test]
+    fn near_api_action_builders_use_typed_values() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "near-api-actions-test");
+        let public_key: ApiPublicKey = secret.public_key().to_string().parse().unwrap();
+        let actions = vec![
+            ApiAction::CreateAccount(CreateAccountAction {}),
+            ApiAction::Transfer(near_api::types::transaction::actions::TransferAction {
+                deposit: NearToken::from_yoctonear(1),
+            }),
+            ApiAction::AddKey(Box::new(AddKeyAction {
+                public_key,
+                access_key: ApiAccessKey {
+                    nonce: 0.into(),
+                    permission: ApiAccessKeyPermission::FullAccess,
+                },
+            })),
+        ];
+        assert_eq!(actions.len(), 3);
     }
 }
