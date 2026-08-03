@@ -17,7 +17,7 @@ This is a standard FT contract that additionally:
 - **Upgradeable** - Owner can upgrade contract code
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
 - **Access control** - Role-based permissions using near-plugins AccessControllable
-- **Automated deployment** - Smart deployment script that auto-creates accounts and handles ownership transfer
+- **Automated deployment** - Typed Rust deployer that validates credentials, creates accounts, handles ownership transfer, and verifies final state
 
 ## How to Build Locally?
 
@@ -49,87 +49,59 @@ just test
 
 ## How to Deploy?
 
-### Testing Deployment (Testnet - Ephemeral)
+### Typed Deployment
 
-Test the full deployment flow on testnet with temporary accounts that are automatically cleaned up:
+Deployment is performed by `cnear-deploy`, a Rust binary that talks directly to NEAR JSON-RPC and never invokes the `near` CLI. The deployer validates account IDs and numeric values, checks WASM magic bytes and prints SHA-256 hashes, queries the signer access key and final block hash before every transaction, signs typed transactions locally, and requires final execution success. After signing, it records the transaction hash before broadcast; a transport timeout or RPC timeout is treated as ambiguous, not failed. It polls transaction status using that hash and signer account, and never immediately resubmits the actions, preventing duplicate execution and nonce errors. If status remains unresolved, the error includes the hash so it can be checked later.
 
-```bash
-# Test deployment (builds contracts, creates temporary accounts, deploys, then deletes them)
-just deploy test
+Credentials must be standard NEAR JSON files containing `account_id`, `public_key`, and `private_key`. The selected file must be a regular, non-symlink file with mode `0600`; its public and private keys must match, and the account/key must be an on-chain full-access key. Set `NEAR_CREDENTIALS` to the credentials root or use `--credentials PATH`.
 
-# Or specify a signer account
-just deploy test your-account.testnet
-
-# Preview commands without executing
-just deploy test your-account.testnet --dry-run
-```
-
-**What happens in test mode:**
-1. Prompts for signer account from `~/.near-credentials/testnet/`
-2. Creates `controller.<signer>.testnet` subaccount (10 NEAR)
-3. Creates `token.<signer>.testnet` subaccount (10 NEAR)
-4. Deploys controller contract
-5. Deploys token contract with signer as initial owner
-6. Transfers token ownership to controller
-7. Verifies ownership
-8. **Deletes both accounts and returns funds to signer**
-
-This is ideal for testing the deployment flow without leaving accounts on testnet.
-
-### Production Deployment (Mainnet)
-
-For permanent deployment to mainnet:
+For an ephemeral testnet deployment, accounts created by this invocation are deleted in reverse dependency order even when deployment fails. Existing accounts are never deleted. Generated key files are stored with mode `0600` and removed after successful test cleanup.
 
 ```bash
-# Deploy (automatically builds contracts first)
-# Interactive mode - prompts for all configuration
-just deploy
+# Build contracts and deploy temporary testnet accounts
+just deploy-test
 
-# Or specify network and signer
-just deploy mainnet your-account.near
+# For signer selection and all other typed options, invoke the binary directly
+cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode \
+  --signer-id your-account.testnet \
+  --credentials "$HOME/.near-credentials/testnet/your-account.testnet.json"
 
-# Preview commands without executing
-just deploy mainnet your-account.near --dry-run
+# Validate inputs and WASM without submitting transactions
+cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode --dry-run \
+  --signer-id your-account.testnet \
+  --credentials "$HOME/.near-credentials/testnet/your-account.testnet.json"
 ```
 
-**Interactive mode prompts:**
-- Network selection (testnet/mainnet)
-- Signer account (from credentials)
-- Controller account ID
-- Token account ID  
-- Token metadata (name, symbol, decimals)
-- Total supply
-- Initial price in yoctoNEAR (default: ONE_NEAR = 10^24, this implies 1 NEAR = 1 cNEAR)
-- Initial balance for new accounts (default: 10 NEAR)
+For permanent deployment, specify the network, signer, and credentials explicitly. Mainnet requires typing `mainnet` unless `--yes` is provided deliberately:
 
-**Production deployment flow:**
-1. Checks if controller account exists, creates if needed
-2. Checks if token account exists, creates if needed
-3. Deploys controller contract
-4. Deploys token contract with signer as initial owner
-5. Transfers token ownership to controller
-6. Verifies ownership
+```bash
+just deploy-mainnet
+
+# Or pass the complete typed configuration directly
+cargo run --manifest-path deploy/Cargo.toml -- --network mainnet \
+  --signer-id your-account.near \
+  --credentials "$HOME/.near-credentials/mainnet/your-account.near.json"
+```
+
+Controller and token IDs default to `controller.<signer>` and `token.<signer>`. Use `--controller-id` and `--token-id` to override them. Existing accounts with deployed code are rejected by default; pass `--redeploy` only when replacing an intentional deployment. Accounts that already contain contract state are always rejected because the deployer will not automatically reinitialize stateful contracts.
+
+**Deployment flow:**
+1. Validate credentials, WASM files, account IDs, and numeric configuration.
+2. Verify signer access and inspect target account state through typed RPC responses.
+3. Create missing accounts with newly generated full-access keys.
+4. Deploy and initialize the controller and token.
+5. Transfer token ownership to the controller.
+6. Verify `owner_get` using typed JSON parsing.
+7. In `--test-mode`, delete newly-created token then controller accounts and return funds to the signer.
+
+**Ambiguous submissions:** A timeout after broadcast does not prove failure. The deployer retains the exact signed transaction hash, queries `EXPERIMENTAL_tx_status` until success/failure or a bounded unresolved timeout, and refuses to submit a duplicate transaction while status is unknown. Save the reported hash when an unresolved error occurs and inspect it before taking any manual recovery action.
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`
 - Freeze/unfreeze accounts via `delegate_execution`
 - Upgrade token via release management (`add_release_info`, `add_release_blob`, `upgrade`)
 
-## How to Deploy Manually?
-
-To deploy manually, install [`cargo-near`](https://github.com/near/cargo-near) and run:
-
-```bash
-# Create a new account
-cargo near create-account <contract-account-id> --useFaucet
-
-# Deploy the contract on it
-cargo near deploy <contract-account-id>
-
-# Initialize the contract (latest_price is in yoctoNEAR, ONE_NEAR = 10^24)
-near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "1000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 8 }, "latest_price": "1000000000000000000000000"}' --accountId <contract-account-id>
-```
-
+The deployer does not log private keys. Keep credential files backed up securely; deleting a generated key file after a non-test deployment would make the account inaccessible. The contract interaction examples below use the NEAR CLI only for post-deployment calls and views, not for deployment.
 ## Basic methods
 ```bash
 # View metadata
@@ -214,6 +186,6 @@ near call <controller-id> upgrade '{"contract_id": "<token-id>", "hash": "<wasm-
 
 - [Smart Contracts Docs](https://docs.near.org/smart-contracts/anatomy)
 - [cargo-near](https://github.com/near/cargo-near) - NEAR smart contract development toolkit for Rust
-- [near CLI](https://near.cli.rs) - Iteract with NEAR blockchain from command line
+- [near CLI](https://near.cli.rs) - Interact with NEAR after deployment
 - [NEAR StackOverflow](https://stackoverflow.com/questions/tagged/nearprotocol)
 - NEAR DevHub: [Telegram](https://t.me/neardevhub), [Twitter](https://twitter.com/neardevhub)

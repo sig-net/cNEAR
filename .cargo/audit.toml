@@ -1,0 +1,29 @@
+# cargo-audit policy for the pinned NEAR 5.12 / near-workspaces 0.19 stack.
+#
+# The lockfile is kept reproducible and directly upgradeable advisories are
+# remediated through Cargo.lock updates. The five entries below remain because
+# the pinned NEAR stack/toolchain cannot consume their fixed versions without a
+# coordinated ecosystem upgrade. rustls 0.23.x, pulled by ureq ->
+# near-sandbox-utils -> near-workspaces, pins rustls-webpki to vulnerable
+# 0.102.x. This rustls path is used by sandbox/workspaces development tooling,
+# not by the on-chain contract. The time advisory is pinned through NEAR 0.29.x
+# and its fix requires Rust 1.88, while this repository intentionally pins Rust
+# 1.86 and a matching reproducible cargo-near build image.
+#
+# Revisit these ignores when the NEAR stack accepts rustls-webpki >= 0.103.13
+# (or rustls-webpki >= 0.104.0-alpha.7), and when the project can coordinate a
+# Rust 1.88+ toolchain/image upgrade for time. Remove each ID after upgrading.
+
+[advisories]
+ignore = [
+    # Reachable panic in CRL parsing; upstream fix is >= 0.103.13.
+    "RUSTSEC-2026-0104",
+    # URI name constraints validation; upstream fix is >= 0.103.12.
+    "RUSTSEC-2026-0098",
+    # Wildcard certificate name constraints validation; upstream fix is >= 0.103.12.
+    "RUSTSEC-2026-0099",
+    # CRL distribution-point matching; upstream fix is >= 0.103.10.
+    "RUSTSEC-2026-0049",
+    # Stack-exhaustion DoS; fixed in time >= 0.3.47, which requires Rust 1.88.
+    "RUSTSEC-2026-0009",
+]

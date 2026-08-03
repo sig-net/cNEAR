@@ -63,35 +63,27 @@ fmt:
 # Full pipeline: check, build, test
 all: check build test
 
-# Deploy contracts (interactive or CLI mode)
-# Usage: just deploy [testnet|mainnet|test] [signer_id] [--dry-run]
-deploy *ARGS:
+# Deploy using the typed Rust binary (no near CLI, eval, or interpolated user arguments).
+# The deploy binary itself provides the complete clap-based option set.
+deploy:
     #!/usr/bin/env bash
-    set -e
-    
-    # Build contracts with suppressed output (show only on error)
-    echo "Building contracts..."
-    BUILD_OUTPUT=$(just build 2>&1)
-    BUILD_EXIT=$?
-    
-    if [ $BUILD_EXIT -ne 0 ]; then
-        echo "$BUILD_OUTPUT"
-        echo "Build failed. Aborting deployment."
-        exit $BUILD_EXIT
-    fi
-    echo "✓ Build complete"
-    echo ""
-    
-    # Run deployment
-    ARGS_STR="{{ARGS}}"
-    if [[ "$ARGS_STR" == "test" || "$ARGS_STR" == "test "* ]]; then
-        # Test mode: auto-select testnet, only prompt for signer
-        REMAINING_ARGS="${ARGS_STR#test}"
-        REMAINING_ARGS="${REMAINING_ARGS# }"
-        ./scripts/deploy.sh testnet $REMAINING_ARGS --test-mode
-    else
-        ./scripts/deploy.sh {{ARGS}}
-    fi
+    set -eu
+    just build
+    cargo run --manifest-path deploy/Cargo.toml --
+
+# Ephemeral testnet deployment with cleanup of accounts created by this run.
+deploy-test:
+    #!/usr/bin/env bash
+    set -eu
+    just build
+    cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode
+
+# Explicit mainnet entrypoint; the binary still requires typed confirmation unless --yes is used directly.
+deploy-mainnet:
+    #!/usr/bin/env bash
+    set -eu
+    just build
+    cargo run --manifest-path deploy/Cargo.toml -- --network mainnet
 
 # Help
 help:
