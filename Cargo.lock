@@ -631,6 +631,7 @@ dependencies = [
  "near-jsonrpc-client",
  "near-jsonrpc-primitives",
  "near-primitives 0.29.2",
+ "near-token",
  "serde",
  "serde_json",
  "sha2 0.10.8",

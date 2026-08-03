@@ -11,7 +11,7 @@ use near_api::types::transaction::actions::{
 use near_api::types::{
     AccessKey as ApiAccessKey, AccessKeyPermission as ApiAccessKeyPermission,
     AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash, NearGas,
-    NearToken, PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
+    PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
 };
 use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction};
 use near_api_types::transaction::result::TransactionResult as ApiTransactionResult;
@@ -25,6 +25,7 @@ use near_jsonrpc_primitives::types::transactions::{RpcTransactionError, Transact
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{AccountId, BlockReference, Nonce};
 use near_primitives::views::{FinalExecutionStatus, TxExecutionStatus};
+use near_token::NearToken;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -375,7 +376,7 @@ async fn submit(
     }
 }
 
-pub fn create_account_actions(amount: u128, public_key: PublicKey) -> Result<Vec<ApiAction>> {
+pub fn create_account_actions(amount: NearToken, public_key: PublicKey) -> Result<Vec<ApiAction>> {
     let api_public_key: ApiPublicKey = public_key
         .to_string()
         .parse()
@@ -383,7 +384,7 @@ pub fn create_account_actions(amount: u128, public_key: PublicKey) -> Result<Vec
     Ok(vec![
         ApiAction::CreateAccount(CreateAccountAction {}),
         ApiAction::Transfer(near_api::types::transaction::actions::TransferAction {
-            deposit: NearToken::from_yoctonear(amount),
+            deposit: amount,
         }),
         ApiAction::AddKey(Box::new(AddKeyAction {
             public_key: api_public_key,

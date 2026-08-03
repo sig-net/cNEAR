@@ -85,6 +85,8 @@ cargo run --manifest-path deploy/Cargo.toml -- --network mainnet \
 
 Controller and token IDs default to `controller.<signer>` and `token.<signer>`. Use `--controller-id` and `--token-id` to override them. Existing accounts with deployed code are rejected by default; pass `--redeploy` only when replacing an intentional deployment. Accounts that already contain contract state are always rejected because the deployer will not automatically reinitialize stateful contracts.
 
+**Amount flags:** `--total-supply`, `--initial-price`, and `--initial-balance` accept decimal amounts with a `near-token` unit, parsed by the `near-token` crate (the same format as `NearToken::from_str`). Units are case-insensitive, and whitespace between the amount and the unit is optional: `NEAR`/`N` (1 NEAR = 10^24 yoctoNEAR), `MILLINEAR` (10^21), `MICRONEAR` (10^18), or `YN`/`YNEAR`/`YOCTONEAR` (1). Examples: `--total-supply "1000000000000000 YN"`, `--initial-price "1 NEAR"`, `--initial-balance "0.5 N"`. Defaults preserve the legacy raw-yocto values: `--total-supply` defaults to `0.000000001 NEAR` (1,000,000,000,000,000 yocto), `--initial-price` to `1 NEAR`, and `--initial-balance` to `10 NEAR`. Each value is converted to a raw yoctoNEAR decimal string for the contract initialization arguments.
+
 **Deployment flow:**
 1. Validate credentials, WASM files, account IDs, and numeric configuration.
 2. Verify signer access and inspect target account state through typed RPC responses.

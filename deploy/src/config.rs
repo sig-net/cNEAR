@@ -1,7 +1,8 @@
-use crate::cli::{Cli, Network, YOCTO_PER_NEAR};
+use crate::cli::{Cli, Network};
 use crate::credentials::{parse_account_id, select_signer, Credentials};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use near_primitives::types::AccountId;
+use near_token::NearToken;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -23,42 +24,13 @@ pub struct DeploymentConfig {
     pub token_name: String,
     pub token_symbol: String,
     pub token_decimals: u8,
-    pub total_supply: u128,
-    pub initial_price: u128,
-    pub initial_balance: u128,
+    pub total_supply: NearToken,
+    pub initial_price: NearToken,
+    pub initial_balance: NearToken,
     pub redeploy: bool,
     pub dry_run: bool,
     pub test_mode: bool,
     pub yes: bool,
-}
-
-pub fn parse_near_amount(value: &str) -> Result<u128> {
-    let value = value.trim();
-    if value.is_empty() || value.starts_with('-') || value.starts_with('+') {
-        bail!("initial balance must be a non-negative decimal amount in NEAR");
-    }
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
-        bail!("initial balance must be a non-negative decimal amount in NEAR");
-    }
-    if fraction.len() > 24 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-        bail!("initial balance must contain at most 24 fractional digits");
-    }
-    let whole = whole
-        .parse::<u128>()
-        .context("initial balance is too large")?;
-    let fraction_value = if fraction.is_empty() {
-        0
-    } else {
-        let padded = format!("{fraction:0<24}");
-        padded
-            .parse::<u128>()
-            .context("invalid fractional NEAR amount")?
-    };
-    whole
-        .checked_mul(YOCTO_PER_NEAR)
-        .and_then(|amount| amount.checked_add(fraction_value))
-        .ok_or_else(|| anyhow!("initial balance is too large"))
 }
 
 fn read_wasm(path: &Path) -> Result<WasmArtifact> {
@@ -102,13 +74,12 @@ pub fn build_config(cli: Cli) -> Result<DeploymentConfig> {
         Some(value) => parse_account_id(value, "token")?,
         None => parse_account_id(&format!("token.{}", signer.account_id), "token")?,
     };
-    if cli.total_supply == 0 {
+    if cli.total_supply.is_zero() {
         bail!("total supply must be greater than zero");
     }
-    if cli.initial_price == 0 {
+    if cli.initial_price.is_zero() {
         bail!("initial price must be greater than zero");
     }
-    let initial_balance = parse_near_amount(&cli.initial_balance)?;
     Ok(DeploymentConfig {
         network: cli.network,
         signer,
@@ -121,7 +92,7 @@ pub fn build_config(cli: Cli) -> Result<DeploymentConfig> {
         token_decimals: cli.token_decimals,
         total_supply: cli.total_supply,
         initial_price: cli.initial_price,
-        initial_balance,
+        initial_balance: cli.initial_balance,
         redeploy: cli.redeploy,
         dry_run: cli.dry_run,
         test_mode: cli.test_mode,
@@ -149,12 +120,5 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(b"not wasm bytes...").unwrap();
         assert!(read_wasm(file.path()).is_err());
-    }
-
-    #[test]
-    fn numeric_values_reject_invalid_input() {
-        assert_eq!(parse_near_amount("1").unwrap(), YOCTO_PER_NEAR);
-        assert_eq!(parse_near_amount("0.000000000000000000000001").unwrap(), 1);
-        assert!(parse_near_amount("-1").is_err());
     }
 }

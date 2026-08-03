@@ -245,9 +245,9 @@ async fn deploy(config: &DeploymentConfig) -> Result<()> {
                     .then_some("new"),
                 json!({
                     "owner_id": config.signer.account_id,
-                    "total_supply": config.total_supply.to_string(),
+                    "total_supply": config.total_supply.as_yoctonear().to_string(),
                     "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
-                    "latest_price": config.initial_price.to_string(),
+                    "latest_price": config.initial_price.as_yoctonear().to_string(),
                 }),
             )?,
             &mut nonce_tracker,
