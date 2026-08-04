@@ -7,12 +7,8 @@ use crate::rpc::{
     access_key, account, finalized_snapshot, full_access, has_contract_state, verify_ownership,
     JsonRpcClient, RpcSnapshot,
 };
-use crate::transaction::{
-    api_network, call_action, create_account_actions, delete_action, deploy_actions,
-    is_unresolved_transaction, NonceTracker, Transaction,
-};
+use crate::transaction::{is_unresolved_transaction, NonceTracker, Transaction};
 use anyhow::{anyhow, bail, Context, Result};
-use near_api::NetworkConfig;
 use near_crypto::{KeyType, SecretKey};
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
@@ -31,7 +27,6 @@ struct AccountHandle {
 
 async fn ensure_account(
     client: &JsonRpcClient,
-    network: &NetworkConfig,
     config: &DeploymentConfig,
     snapshot: RpcSnapshot,
     account_id: &AccountId,
@@ -68,19 +63,10 @@ async fn ensure_account(
 
     let secret_key = SecretKey::from_random(KeyType::ED25519);
     let credentials = persist_generated_credentials(&path, account_id.clone(), secret_key)?;
-    if let Err(error) = Transaction::new(
-        client,
-        network,
-        &config.signer,
-        account_id.clone(),
-        nonce_tracker,
-    )
-    .actions(create_account_actions(
-        config.initial_balance,
-        credentials.secret_key.public_key(),
-    )?)
-    .send()
-    .await
+    if let Err(error) = Transaction::new(client, &config.signer, account_id.clone(), nonce_tracker)
+        .create_account(config.initial_balance, credentials.secret_key.public_key())
+        .send()
+        .await
     {
         let _ = fs::remove_file(&path);
         return Err(error).with_context(|| format!("could not create account {account_id}"));
@@ -95,7 +81,6 @@ async fn ensure_account(
 
 async fn cleanup_accounts(
     client: &JsonRpcClient,
-    network: &NetworkConfig,
     config: &DeploymentConfig,
     token: Option<&AccountHandle>,
     controller: Option<&AccountHandle>,
@@ -108,12 +93,11 @@ async fn cleanup_accounts(
         }
         if let Err(error) = Transaction::new(
             client,
-            network,
             &handle.credentials,
             handle.credentials.account_id.clone(),
             nonce_tracker,
         )
-        .add_action(delete_action(config.signer.account_id.clone())?)
+        .delete_account(config.signer.account_id.clone())
         .send()
         .await
         {
@@ -154,7 +138,6 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         }
     }
     let client = JsonRpcClient::connect(config.network.rpc_url());
-    let network = api_network(config.network);
     let snapshot = finalized_snapshot(&client).await?;
     access_key(&client, snapshot.block_reference(), &config.signer).await?;
     let controller = account(&client, snapshot.block_reference(), &config.controller_id).await?;
@@ -187,7 +170,6 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
     let deployment = async {
         let controller = ensure_account(
             &client,
-            &network,
             config,
             snapshot,
             &config.controller_id,
@@ -197,7 +179,6 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         controller_account = Some(controller);
         let token = ensure_account(
             &client,
-            &network,
             config,
             snapshot,
             &config.token_id,
@@ -215,12 +196,11 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
             .credentials;
         Transaction::new(
             &client,
-            &network,
             controller_credentials,
             config.controller_id.clone(),
             &mut nonce_tracker,
         )
-        .actions(deploy_actions(
+        .deploy(
             config.controller_wasm.bytes.clone(),
             controller_account
                 .as_ref()
@@ -228,32 +208,31 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
                 .needs_initialization
                 .then_some("new"),
             json!({ "dao": config.signer.account_id }),
-        )?)
+        )
         .send()
         .await?;
         Transaction::new(
             &client,
-            &network,
             token_credentials,
             config.token_id.clone(),
             &mut nonce_tracker,
         )
-        .actions(deploy_actions(
-                config.token_wasm.bytes.clone(),
-                token_account
-                    .as_ref()
-                    .expect("token account set")
-                    .needs_initialization
-                    .then_some("new"),
-                json!({
-                    "owner_id": config.signer.account_id,
-                    "total_supply": config.total_supply.as_yoctonear().to_string(),
-                    "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
-                    "latest_price": config.initial_price.as_yoctonear().to_string(),
-                }),
-            )?)
-            .send()
-            .await?;
+        .deploy(
+            config.token_wasm.bytes.clone(),
+            token_account
+                .as_ref()
+                .expect("token account set")
+                .needs_initialization
+                .then_some("new"),
+            json!({
+                "owner_id": config.signer.account_id,
+                "total_supply": config.total_supply.as_yoctonear().to_string(),
+                "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
+                "latest_price": config.initial_price.as_yoctonear().to_string(),
+            }),
+        )
+        .send()
+        .await?;
         if token_account
             .as_ref()
             .expect("token account set")
@@ -261,16 +240,11 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         {
             Transaction::new(
                 &client,
-                &network,
                 &config.signer,
                 config.token_id.clone(),
                 &mut nonce_tracker,
             )
-            .add_action(call_action(
-                "owner_set",
-                json!({ "new_owner": config.controller_id }),
-                1,
-            ))
+            .call("owner_set", json!({ "new_owner": config.controller_id }), 1)
             .send()
             .await?;
         }
@@ -280,7 +254,6 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         if config.test_mode && !is_unresolved_transaction(&error) {
             if let Err(cleanup_error) = cleanup_accounts(
                 &client,
-                &network,
                 config,
                 token_account.as_ref(),
                 controller_account.as_ref(),
@@ -300,7 +273,6 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
     if config.test_mode {
         cleanup_accounts(
             &client,
-            &network,
             config,
             token_account.as_ref(),
             controller_account.as_ref(),

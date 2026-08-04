@@ -1,21 +1,7 @@
-use crate::cli::Network;
-use crate::credentials::{parse_account_id, Credentials};
+use crate::credentials::Credentials;
 use crate::rpc::{access_key, block_hash, full_access};
-use anyhow::{anyhow, bail, Context, Result};
-use near_api::advanced::{ExecuteSignedTransaction, TransactionableOrSigned};
-use near_api::errors::ExecuteTransactionError;
-use near_api::types::transaction::actions::{
-    AddKeyAction, CreateAccountAction, DeleteAccountAction, DeployContractAction,
-    FunctionCallAction,
-};
-use near_api::types::{
-    AccessKey as ApiAccessKey, AccessKeyPermission as ApiAccessKeyPermission,
-    AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash,
-    PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
-};
-use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction as ApiTransaction};
-use near_api_types::transaction::result::TransactionResult as ApiTransactionResult;
-use near_crypto::{PublicKey, SecretKey};
+use anyhow::{anyhow, bail, Result};
+use near_crypto::{InMemorySigner, PublicKey};
 use near_gas::NearGas;
 use near_jsonrpc_client::JsonRpcClient;
 use near_jsonrpc_client::{
@@ -23,7 +9,15 @@ use near_jsonrpc_client::{
     methods,
 };
 use near_jsonrpc_primitives::types::transactions::{RpcTransactionError, TransactionInfo};
+use near_primitives::account::{AccessKey, AccessKeyPermission};
+use near_primitives::action::{
+    Action, AddKeyAction, CreateAccountAction, DeleteAccountAction, DeployContractAction,
+    FunctionCallAction, TransferAction,
+};
 use near_primitives::hash::CryptoHash;
+use near_primitives::transaction::{
+    SignedTransaction, Transaction as NearTransaction, TransactionV0,
+};
 use near_primitives::types::{AccountId, BlockReference, Nonce};
 use near_primitives::views::{FinalExecutionStatus, TxExecutionStatus};
 use near_token::NearToken;
@@ -115,69 +109,30 @@ impl NonceTracker {
     }
 }
 
-fn api_account_id(account_id: &AccountId) -> Result<ApiAccountId> {
-    account_id
-        .to_string()
-        .parse()
-        .with_context(|| format!("could not convert account ID {account_id} for near-api"))
-}
-
-/// Convert a `near-primitives` block hash to near-api's own `CryptoHash` type.
-/// Both are transparent `[u8; 32]` wrappers with public fields, so this is a
-/// direct field swap rather than a string round-trip.
-fn api_crypto_hash(hash: CryptoHash) -> ApiCryptoHash {
-    ApiCryptoHash(hash.0)
-}
-
-fn api_secret_key(secret_key: &SecretKey) -> Result<ApiSecretKey> {
-    secret_key
-        .to_string()
-        .parse()
-        .context("could not convert signing key for near-api")
-}
-
-pub fn api_network(network: Network) -> NetworkConfig {
-    let endpoint = match network {
-        Network::Testnet => RPCEndpoint::testnet(),
-        Network::Mainnet => RPCEndpoint::mainnet(),
-    }
-    .with_retries(1);
-    let mut config = match network {
-        Network::Testnet => NetworkConfig::testnet(),
-        Network::Mainnet => NetworkConfig::mainnet(),
-    };
-    config.rpc_endpoints = vec![endpoint];
-    config
-}
-
-async fn make_transaction(
+/// Build and sign a transaction over the native near-primitives type stack.
+/// Signing is a plain operation (no network), so this is a synchronous `fn`.
+fn make_transaction(
     signer: &Credentials,
     receiver_id: AccountId,
     nonce: Nonce,
     block_hash: CryptoHash,
-    actions: Vec<ApiAction>,
-) -> Result<ExecuteSignedTransaction> {
-    let api_signer = Signer::from_secret_key(api_secret_key(&signer.secret_key)?)
-        .context("could not create near-api signer")?;
-    let mut transaction = ApiTransaction::construct(
-        api_account_id(&signer.account_id)?,
-        api_account_id(&receiver_id)?,
-    );
-    for action in actions {
-        transaction = transaction.add_action(action);
-    }
-    transaction
-        .with_signer(api_signer.clone())
-        .presign_offline(
-            api_signer
-                .get_public_key()
-                .await
-                .context("could not read near-api public key")?,
-            api_crypto_hash(block_hash),
-            nonce,
-        )
-        .await
-        .map_err(|error: ExecuteTransactionError| anyhow!("near-api signing failed: {error}"))
+    actions: Vec<Action>,
+) -> SignedTransaction {
+    let crypto_signer =
+        InMemorySigner::from_secret_key(signer.account_id.clone(), signer.secret_key.clone());
+    let transaction = NearTransaction::V0(TransactionV0 {
+        signer_id: signer.account_id.clone(),
+        public_key: crypto_signer.public_key(),
+        nonce,
+        receiver_id,
+        block_hash,
+        actions,
+    });
+    // Sign the canonical borsh hash; `SignedTransaction::new` recomputes the
+    // same hash, so `get_hash()` below always matches what was signed.
+    let (hash, _) = transaction.get_hash_and_size();
+    let signature = crypto_signer.sign(&hash.0);
+    SignedTransaction::new(signature, transaction)
 }
 
 const DEFAULT_GAS: NearGas = NearGas::from_tgas(300);
@@ -232,15 +187,17 @@ pub fn is_confirmed_transaction_failure(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
-fn is_pre_broadcast_near_api_error(error: &ExecuteTransactionError) -> bool {
+/// Only `InvalidTransaction` proves the node rejected the transaction before it
+/// could enter the pool, so the nonce was never consumed. Every other broadcast
+/// error (`TimeoutError`, `UnknownTransaction`, `RequestRouted`,
+/// `DoesNotTrackShard`, `InternalError`, transport errors) means the outcome is
+/// unknown and must be reconciled by hash instead.
+fn is_pre_broadcast_rejection(error: &JsonRpcError<RpcTransactionError>) -> bool {
     matches!(
         error,
-        ExecuteTransactionError::ArgumentValidationError(_)
-            | ExecuteTransactionError::PreQueryError(_)
-            | ExecuteTransactionError::ValidationError(_)
-            | ExecuteTransactionError::MetaSignError(_)
-            | ExecuteTransactionError::SignerError(_)
-            | ExecuteTransactionError::DataConversionError(_)
+        JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+            RpcTransactionError::InvalidTransaction { .. }
+        ))
     )
 }
 
@@ -314,46 +271,38 @@ struct SubmissionOutcome {
     was_ambiguous: bool,
 }
 
-async fn submit(
-    client: &JsonRpcClient,
-    signed_transaction: ExecuteSignedTransaction,
-    network: &NetworkConfig,
-) -> Result<SubmissionOutcome> {
-    // The transaction is presigned once. Capture its hash before the single near-api broadcast;
-    // a transport timeout is ambiguous and must reconcile this exact hash instead of resubmitting.
-    let signed = match &signed_transaction.transaction {
-        TransactionableOrSigned::Signed((signed, _)) => signed,
-        TransactionableOrSigned::Transactionable(_) => {
-            bail!("near-api transaction was not presigned")
-        }
-    };
-    // near-api's CryptoHash and near-primitives' are both transparent `[u8; 32]`
-    // wrappers, so this is a direct field swap, not a string round-trip.
-    let tx_hash: CryptoHash = CryptoHash(signed.get_hash().0);
-    let signer_id: AccountId = parse_account_id(signed.transaction.signer_id().as_ref(), "signer")?;
+async fn submit(client: &JsonRpcClient, signed: SignedTransaction) -> Result<SubmissionOutcome> {
+    // The transaction is presigned once and broadcast exactly once — deliberately no retry.
+    // Capture its hash before the single broadcast call; a transport timeout is ambiguous
+    // and must reconcile this exact hash instead of resubmitting.
+    let tx_hash = signed.get_hash();
+    let signer_id = signed.transaction.signer_id().clone();
     let result = tokio::time::timeout(
         TRANSACTION_BROADCAST_TIMEOUT,
-        signed_transaction.send_to(network),
+        client.call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            signed_transaction: signed,
+        }),
     )
     .await;
 
     match result {
-        Ok(Ok(ApiTransactionResult::Full(final_result))) if final_result.is_success() => {
-            Ok(SubmissionOutcome {
+        Ok(Ok(outcome)) => match outcome.status {
+            FinalExecutionStatus::SuccessValue(_) => Ok(SubmissionOutcome {
                 was_ambiguous: false,
-            })
-        }
-        Ok(Ok(ApiTransactionResult::Full(_))) => Err(ConfirmedTransactionFailure {
-            tx_hash,
-            detail: "final execution status reported failure".to_string(),
-        }
-        .into()),
-        Ok(Ok(ApiTransactionResult::Pending { .. })) => {
-            reconcile_transaction(client, tx_hash, signer_id).await?;
-            Ok(SubmissionOutcome {
-                was_ambiguous: true,
-            })
-        }
+            }),
+            FinalExecutionStatus::Failure(error) => Err(ConfirmedTransactionFailure {
+                tx_hash,
+                detail: format!("{error:?}"),
+            }
+            .into()),
+            FinalExecutionStatus::NotStarted | FinalExecutionStatus::Started => {
+                // The node returned before a final outcome was available.
+                reconcile_transaction(client, tx_hash, signer_id).await?;
+                Ok(SubmissionOutcome {
+                    was_ambiguous: true,
+                })
+            }
+        },
         Err(_) => {
             eprintln!(
                 "broadcast timed out for transaction {tx_hash}; querying status before deciding"
@@ -363,8 +312,8 @@ async fn submit(
                 was_ambiguous: true,
             })
         }
-        Ok(Err(error)) if is_pre_broadcast_near_api_error(&error) => {
-            Err(anyhow!("near-api transaction preparation failed: {error}"))
+        Ok(Err(error)) if is_pre_broadcast_rejection(&error) => {
+            Err(anyhow!("transaction rejected before broadcast: {error}"))
         }
         Ok(Err(error)) => {
             eprintln!(
@@ -378,82 +327,30 @@ async fn submit(
     }
 }
 
-pub fn create_account_actions(amount: NearToken, public_key: PublicKey) -> Result<Vec<ApiAction>> {
-    let api_public_key: ApiPublicKey = public_key
-        .to_string()
-        .parse()
-        .context("could not convert generated public key for near-api")?;
-    Ok(vec![
-        ApiAction::CreateAccount(CreateAccountAction {}),
-        ApiAction::Transfer(near_api::types::transaction::actions::TransferAction {
-            deposit: amount,
-        }),
-        ApiAction::AddKey(Box::new(AddKeyAction {
-            public_key: api_public_key,
-            access_key: ApiAccessKey {
-                nonce: 0.into(),
-                permission: ApiAccessKeyPermission::FullAccess,
-            },
-        })),
-    ])
-}
-
-pub fn deploy_actions(wasm: Vec<u8>, method: Option<&str>, args: Value) -> Result<Vec<ApiAction>> {
-    let mut actions = vec![ApiAction::DeployContract(DeployContractAction {
-        code: wasm,
-    })];
-    if let Some(method) = method {
-        actions.push(ApiAction::FunctionCall(Box::new(FunctionCallAction {
-            method_name: method.to_string(),
-            args: serde_json::to_vec(&args).expect("deployment arguments are serializable"),
-            gas: DEFAULT_GAS,
-            deposit: NearToken::from_yoctonear(0),
-        })));
-    }
-    Ok(actions)
-}
-
-pub fn call_action(method: &str, args: Value, deposit: u128) -> ApiAction {
-    ApiAction::FunctionCall(Box::new(FunctionCallAction {
-        method_name: method.to_string(),
-        args: serde_json::to_vec(&args).expect("call arguments are serializable"),
-        gas: DEFAULT_GAS,
-        deposit: NearToken::from_yoctonear(deposit),
-    }))
-}
-
-pub fn delete_action(beneficiary_id: AccountId) -> Result<ApiAction> {
-    Ok(ApiAction::DeleteAccount(DeleteAccountAction {
-        beneficiary_id: api_account_id(&beneficiary_id)?,
-    }))
-}
-
 /// A builder for sending a single batch of actions as one signed transaction.
 ///
-/// The receiver and actions are configured explicitly, then `.send().await`
-/// signs and broadcasts exactly once (no automatic retry), reconciling by hash
-/// if the outcome is ambiguous and advancing the local nonce tracker only after
-/// confirmation.
+/// Configure the receiver at `new`, chain action methods such as
+/// `.create_account(...)`, `.deploy(...)`, `.call(...)`, or
+/// `.delete_account(...)`, then `.send().await`. Transactions are broadcast
+/// exactly once (no automatic retry), reconciled by hash if the outcome is
+/// ambiguous, and the local nonce tracker advances only after confirmation.
 pub struct Transaction<'a> {
     client: &'a JsonRpcClient,
-    network: &'a NetworkConfig,
     signer: &'a Credentials,
     receiver: AccountId,
-    actions: Vec<ApiAction>,
+    actions: Vec<Action>,
     nonce_tracker: &'a mut NonceTracker,
 }
 
 impl<'a> Transaction<'a> {
     pub fn new(
         client: &'a JsonRpcClient,
-        network: &'a NetworkConfig,
         signer: &'a Credentials,
         receiver: AccountId,
         nonce_tracker: &'a mut NonceTracker,
     ) -> Self {
         Self {
             client,
-            network,
             signer,
             receiver,
             actions: Vec::new(),
@@ -461,15 +358,60 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Append a single action to the transaction.
-    pub fn add_action(mut self, action: ApiAction) -> Self {
-        self.actions.push(action);
+    /// Append actions that create the receiver as a subaccount of the signer,
+    /// funding it with `amount` and attaching a full-access key for `public_key`.
+    pub fn create_account(mut self, amount: NearToken, public_key: PublicKey) -> Self {
+        self.actions
+            .push(Action::CreateAccount(CreateAccountAction {}));
+        self.actions.push(Action::Transfer(TransferAction {
+            deposit: amount.as_yoctonear(),
+        }));
+        self.actions.push(Action::AddKey(Box::new(AddKeyAction {
+            public_key,
+            access_key: AccessKey {
+                nonce: 0,
+                permission: AccessKeyPermission::FullAccess,
+            },
+        })));
         self
     }
 
-    /// Replace the action list with the given actions.
-    pub fn actions(mut self, actions: Vec<ApiAction>) -> Self {
-        self.actions = actions;
+    /// Append actions that deploy `wasm` to the receiver, optionally followed by
+    /// an initialization `FunctionCall` to `method` with `args`.
+    pub fn deploy(mut self, wasm: Vec<u8>, method: Option<&str>, args: Value) -> Self {
+        self.actions
+            .push(Action::DeployContract(DeployContractAction { code: wasm }));
+        if let Some(method) = method {
+            self.actions
+                .push(Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: method.to_string(),
+                    args: serde_json::to_vec(&args).expect("deployment arguments are serializable"),
+                    gas: DEFAULT_GAS.as_gas(),
+                    deposit: 0,
+                })));
+        }
+        self
+    }
+
+    /// Append a `FunctionCall` to `method` with `args` and `deposit` yoctoNEAR.
+    pub fn call(mut self, method: &str, args: Value, deposit: u128) -> Self {
+        self.actions
+            .push(Action::FunctionCall(Box::new(FunctionCallAction {
+                method_name: method.to_string(),
+                args: serde_json::to_vec(&args).expect("call arguments are serializable"),
+                gas: DEFAULT_GAS.as_gas(),
+                deposit,
+            })));
+        self
+    }
+
+    /// Append a `DeleteAccount` action deleting the receiver and sending its
+    /// remaining balance to `beneficiary_id`.
+    pub fn delete_account(mut self, beneficiary_id: AccountId) -> Self {
+        self.actions
+            .push(Action::DeleteAccount(DeleteAccountAction {
+                beneficiary_id,
+            }));
         self
     }
 
@@ -486,9 +428,8 @@ impl<'a> Transaction<'a> {
             nonce,
             block_hash(self.client).await?,
             self.actions,
-        )
-        .await?;
-        let result = submit(self.client, tx, self.network).await;
+        );
+        let result = submit(self.client, tx).await;
         match settle_nonce(self.nonce_tracker, self.signer, nonce, result).await? {
             PostSubmit::NeedsRefresh => {
                 // Reconcile the local value with RPC after an ambiguous broadcast.
@@ -545,8 +486,7 @@ async fn settle_nonce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::Network;
-    use near_crypto::KeyType;
+    use near_crypto::{KeyType, SecretKey};
 
     #[test]
     fn nonce_tracker_reuses_and_advances_local_nonce() {
@@ -571,55 +511,63 @@ mod tests {
     }
 
     #[test]
-    fn near_api_network_uses_one_broadcast_attempt() {
-        assert_eq!(api_network(Network::Testnet).rpc_endpoints[0].retries, 1);
-        assert_eq!(api_network(Network::Mainnet).rpc_endpoints[0].retries, 1);
-    }
-
-    #[tokio::test]
-    async fn near_api_signed_hash_is_preserved_for_reconciliation() {
-        let secret = SecretKey::from_seed(KeyType::ED25519, "near-api-hash-test");
+    fn signed_hash_is_preserved_for_reconciliation() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "hash-preservation-test");
         let signer = Credentials {
             account_id: "alice.testnet".parse().unwrap(),
             secret_key: secret,
         };
         let receiver: AccountId = "bob.testnet".parse().unwrap();
-        let transaction = make_transaction(
-            &signer,
-            receiver,
-            1,
-            CryptoHash::default(),
-            vec![call_action("owner_set", serde_json::json!({}), 1)],
-        )
-        .await
-        .unwrap();
-        let TransactionableOrSigned::Signed((signed, _)) = transaction.transaction else {
-            panic!("transaction was not presigned");
-        };
-        // The field swap must be lossless in both directions.
-        let converted = CryptoHash(signed.get_hash().0);
-        assert_eq!(converted.0, signed.get_hash().0);
-        assert_eq!(ApiCryptoHash(converted.0).0, signed.get_hash().0);
+        let client = JsonRpcClient::connect("http://localhost:3030");
+        let mut tracker = NonceTracker::default();
+        let actions = Transaction::new(&client, &signer, receiver.clone(), &mut tracker)
+            .call("owner_set", serde_json::json!({}), 1)
+            .actions;
+        let signed = make_transaction(&signer, receiver, 1, CryptoHash::default(), actions);
+        // The signature is over the canonical borsh hash, and `get_hash()`
+        // returns exactly that hash — what reconciliation queries by.
+        let expected_hash = signed.transaction.get_hash_and_size().0;
+        assert_eq!(signed.get_hash(), expected_hash);
+        assert!(signed
+            .signature
+            .verify(&expected_hash.0, &signer.secret_key.public_key()));
     }
 
     #[test]
-    fn near_api_action_builders_use_typed_values() {
-        let secret = SecretKey::from_seed(KeyType::ED25519, "near-api-actions-test");
-        let public_key: ApiPublicKey = secret.public_key().to_string().parse().unwrap();
-        let actions = vec![
-            ApiAction::CreateAccount(CreateAccountAction {}),
-            ApiAction::Transfer(near_api::types::transaction::actions::TransferAction {
-                deposit: NearToken::from_yoctonear(1),
-            }),
-            ApiAction::AddKey(Box::new(AddKeyAction {
-                public_key,
-                access_key: ApiAccessKey {
-                    nonce: 0.into(),
-                    permission: ApiAccessKeyPermission::FullAccess,
-                },
-            })),
-        ];
+    fn transaction_builder_action_methods_append_native_actions() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "native-actions-test");
+        let signer = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let receiver: AccountId = "bob.testnet".parse().unwrap();
+        let client = JsonRpcClient::connect("http://localhost:3030");
+        let mut tracker = NonceTracker::default();
+
+        let actions = Transaction::new(&client, &signer, receiver.clone(), &mut tracker)
+            .create_account(NearToken::from_yoctonear(1), signer.secret_key.public_key())
+            .actions;
         assert_eq!(actions.len(), 3);
+        assert!(matches!(actions[0], Action::CreateAccount(_)));
+        assert!(matches!(actions[2], Action::AddKey(_)));
+
+        let actions = Transaction::new(&client, &signer, receiver.clone(), &mut tracker)
+            .deploy(vec![1, 2, 3], Some("new"), serde_json::json!({}))
+            .actions;
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::DeployContract(_)));
+
+        let actions = Transaction::new(&client, &signer, receiver.clone(), &mut tracker)
+            .call("owner_set", serde_json::json!({}), 1)
+            .actions;
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::FunctionCall(_)));
+
+        let actions = Transaction::new(&client, &signer, receiver, &mut tracker)
+            .delete_account("beneficiary.testnet".parse().unwrap())
+            .actions;
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::DeleteAccount(_)));
     }
 
     fn key(credentials: &Credentials) -> NonceKey {
