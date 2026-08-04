@@ -115,6 +115,19 @@ just deploy mainnet your-account.near --dry-run
 - Freeze/unfreeze accounts via `delegate_execution`
 - Upgrade token via release management (`add_release_info`, `add_release_blob`, `upgrade`)
 
+Once you are happy with a deployment, and have manually tested all the functionality, remove all access keys from the cNEAR contract **AND** the controller contract:
+
+```bash
+# List the keys currently on the token account
+near list-keys <contract-id> --networkId mainnet
+
+# Delete each full access key listed above
+near delete-key <contract-id> <public-key> --accountId <token-account-id> --networkId mainnet
+
+# Verify the account is keyless
+near list-keys <contract-id> --networkId mainnet
+```
+
 ## How to Deploy Manually?
 
 To deploy manually, install [`cargo-near`](https://github.com/near/cargo-near) and run:
