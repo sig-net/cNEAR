@@ -121,8 +121,8 @@ pub fn select_signer(
     let expected = signer_id
         .map(|value| parse_account_id(value, "signer"))
         .transpose()?;
-    let path = credential_path(network, expected.as_ref(), credentials)?;
     if credentials.is_some() || expected.is_some() {
+        let path = credential_path(network, expected.as_ref(), credentials)?;
         return load_credentials(&path, expected.as_ref());
     }
     let paths = list_credentials(network)?;

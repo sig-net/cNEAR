@@ -9,15 +9,20 @@ setup-controller:
         git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$TARGET_DIR/contracts/aurora-controller-factory"
     fi
 
-# Build aurora-controller using cargo make (puts wasm in res/)
+# Build aurora-controller by invoking cargo-near directly (the controller's
+# Makefile.toml wraps this same command; cargo-make is not required).
 build-controller: setup-controller
     #!/usr/bin/env bash
-    cd contracts/aurora-controller-factory
-    cargo make build
-    # Copy wasms back to repo root's target/near dir
-    cd ../..
+    set -eu
+    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
+    CONTRACT_DIR="$TARGET_DIR/contracts/aurora-controller-factory"
     mkdir -p target/near
-    cp contracts/aurora-controller-factory/res/aurora-controller-factory.wasm target/near/ 2>/dev/null || true
+    cargo near build non-reproducible-wasm \
+        --manifest-path "$CONTRACT_DIR/contract/Cargo.toml" \
+        --out-dir "$CONTRACT_DIR/res" \
+        --no-embed-abi \
+        --no-abi
+    cp "$CONTRACT_DIR/res/aurora_controller_factory.wasm" target/near/aurora-controller-factory.wasm
 
 # Build token contract with wasm-opt
 build-token:
@@ -47,8 +52,7 @@ clean:
     TARGET_DIR="${CARGO_TARGET_DIR:-.}"
     rm -rf target/near/
     if [ -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
-        cd "$TARGET_DIR/contracts/aurora-controller-factory"
-        cargo make clean
+        cargo clean --manifest-path "$TARGET_DIR/contracts/aurora-controller-factory/contract/Cargo.toml"
     fi
 
 # Check code

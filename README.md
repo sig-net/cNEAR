@@ -51,13 +51,18 @@ just test
 
 ### Typed Deployment
 
-Deployment is performed by `cnear-deploy`, a Rust binary that builds and signs transactions with `near-primitives`/`near-crypto` and broadcasts them with `near-jsonrpc-client` (single `broadcast_tx_commit` attempt), using typed NEAR JSON-RPC queries for preflight inspection and hash-based reconciliation. It never invokes the `near` CLI. The deployer validates account IDs and numeric values, checks WASM magic bytes and prints SHA-256 hashes, queries the signer access key and final block hash before every transaction, and requires final execution success. It maintains a local next-nonce tracker for each signing account/key, so sequential transactions do not rely on a lagging replica returning the latest nonce; the tracker advances only after confirmation and never moves backwards on stale RPC data. After signing, it records the transaction hash before broadcast; a transport timeout or RPC timeout is treated as ambiguous, not failed. It polls transaction status using that hash and signer account, refreshes nonce state after an ambiguous submission, and never immediately resubmits the actions, preventing duplicate execution and nonce errors. If status remains unresolved, the error includes the hash so it can be checked later.
+Deployment is performed by `cnear-deploy`, a Rust binary that builds and signs transactions with `near-primitives`/`near-crypto` and broadcasts them with `near-jsonrpc-client` (single `broadcast_tx_commit` attempt), using typed NEAR JSON-RPC queries for preflight inspection and hash-based reconciliation. It never invokes the `near` CLI. The deployer validates account IDs and numeric values, checks WASM magic bytes and prints SHA-256 hashes, queries the signer access key and final block hash before every transaction, and requires final execution success.
+
+**Interactive mode:** `just deploy` (or the binary invoked with no flags) drives a fully interactive configuration flow mirroring the original `deploy.sh`: it prompts for the network, selects the signer from your local credentials, and asks for the controller/token account IDs, token metadata, and token amounts. Every answer is parsed and validated by the same typed machinery as the CLI flags, and pressing Enter accepts the shown default. Passing any flag switches to the non-interactive typed mode below. It maintains a local next-nonce tracker for each signing account/key, so sequential transactions do not rely on a lagging replica returning the latest nonce; the tracker advances only after confirmation and never moves backwards on stale RPC data. After signing, it records the transaction hash before broadcast; a transport timeout or RPC timeout is treated as ambiguous, not failed. It polls transaction status using that hash and signer account, refreshes nonce state after an ambiguous submission, and never immediately resubmits the actions, preventing duplicate execution and nonce errors. If status remains unresolved, the error includes the hash so it can be checked later.
 
 Credentials must be standard NEAR JSON files containing `account_id`, `public_key`, and `private_key`. The selected file must be a regular, non-symlink file with mode `0600`; its public and private keys must match, and the account/key must be an on-chain full-access key. Set `NEAR_CREDENTIALS` to the credentials root or use `--credentials PATH`.
 
 For an ephemeral testnet deployment, accounts created by this invocation are deleted in reverse dependency order even when deployment fails. Existing accounts are never deleted. Generated key files are stored with mode `0600` and removed after successful test cleanup.
 
 ```bash
+# Fully interactive deployment (builds contracts, then prompts for everything)
+just deploy
+
 # Build contracts and deploy temporary testnet accounts
 just deploy-test
 
