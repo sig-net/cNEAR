@@ -377,11 +377,11 @@ impl<'a> Transaction<'a> {
     }
 
     /// Append actions that deploy `wasm` to the receiver, optionally followed by
-    /// an initialization `FunctionCall` to `method` with `args`.
-    pub fn deploy(mut self, wasm: Vec<u8>, method: Option<&str>, args: Value) -> Self {
+    /// an initialization `FunctionCall` with `init`'s method name and args.
+    pub fn deploy(mut self, wasm: Vec<u8>, init: Option<(&str, Value)>) -> Self {
         self.actions
             .push(Action::DeployContract(DeployContractAction { code: wasm }));
-        if let Some(method) = method {
+        if let Some((method, args)) = init {
             self.actions
                 .push(Action::FunctionCall(Box::new(FunctionCallAction {
                     method_name: method.to_string(),
@@ -552,7 +552,7 @@ mod tests {
         assert!(matches!(actions[2], Action::AddKey(_)));
 
         let actions = Transaction::new(&client, &signer, receiver.clone(), &mut tracker)
-            .deploy(vec![1, 2, 3], Some("new"), serde_json::json!({}))
+            .deploy(vec![1, 2, 3], Some(("new", serde_json::json!({}))))
             .actions;
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0], Action::DeployContract(_)));

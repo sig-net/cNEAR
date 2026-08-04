@@ -79,15 +79,17 @@ async fn ensure_account(
     })
 }
 
+/// Delete the given accounts in order (callers pass token before controller),
+/// sending remaining balances to the signer. Accounts not created by this run
+/// are skipped; credential files for deleted accounts are removed.
 async fn cleanup_accounts(
     client: &JsonRpcClient,
     config: &DeploymentConfig,
-    token: Option<&AccountHandle>,
-    controller: Option<&AccountHandle>,
+    handles: &[&AccountHandle],
     nonce_tracker: &mut NonceTracker,
 ) -> Result<()> {
     let mut first_error = None;
-    for handle in [token, controller].into_iter().flatten() {
+    for handle in handles {
         if !handle.created {
             continue;
         }
@@ -121,6 +123,120 @@ async fn cleanup_accounts(
     first_error.map_or(Ok(()), |error| {
         Err(error).context("one or more cleanup transactions failed")
     })
+}
+
+/// Accounts prepared for deployment. Each handle records whether this run
+/// created the account, which drives test-mode cleanup.
+struct PreparedAccounts {
+    controller: AccountHandle,
+    token: AccountHandle,
+}
+
+/// Ensure both target accounts exist. If the token cannot be prepared after the
+/// controller already was, the controller is cleaned up (in test mode) before
+/// the error is returned.
+async fn prepare_accounts(
+    client: &JsonRpcClient,
+    config: &DeploymentConfig,
+    snapshot: RpcSnapshot,
+    nonce_tracker: &mut NonceTracker,
+) -> Result<PreparedAccounts> {
+    let controller = ensure_account(
+        client,
+        config,
+        snapshot,
+        &config.controller_id,
+        nonce_tracker,
+    )
+    .await?;
+    match ensure_account(client, config, snapshot, &config.token_id, nonce_tracker).await {
+        Ok(token) => Ok(PreparedAccounts { controller, token }),
+        Err(error) => {
+            if config.test_mode && !is_unresolved_transaction(&error) {
+                if let Err(cleanup_error) =
+                    cleanup_accounts(client, config, &[&controller], nonce_tracker).await
+                {
+                    return Err(error.context(format!("cleanup also failed: {cleanup_error}")));
+                }
+            } else if config.test_mode {
+                eprintln!(
+                    "skipping cleanup because a transaction outcome is unresolved; inspect its hash before retrying"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Delete the accounts created by this run in reverse dependency order (token
+/// first), returning the first error encountered.
+async fn cleanup_created_accounts(
+    client: &JsonRpcClient,
+    config: &DeploymentConfig,
+    accounts: &PreparedAccounts,
+    nonce_tracker: &mut NonceTracker,
+) -> Result<()> {
+    cleanup_accounts(
+        client,
+        config,
+        &[&accounts.token, &accounts.controller],
+        nonce_tracker,
+    )
+    .await
+}
+
+/// Deploy and initialize the contracts on the prepared accounts, transfer token
+/// ownership to the controller, and verify it.
+async fn deploy_contracts(
+    client: &JsonRpcClient,
+    config: &DeploymentConfig,
+    accounts: &PreparedAccounts,
+    nonce_tracker: &mut NonceTracker,
+) -> Result<()> {
+    let controller_credentials = &accounts.controller.credentials;
+    let token_credentials = &accounts.token.credentials;
+    Transaction::new(
+        client,
+        controller_credentials,
+        config.controller_id.clone(),
+        nonce_tracker,
+    )
+    .deploy(
+        config.controller_wasm.bytes.clone(),
+        accounts
+            .controller
+            .needs_initialization
+            .then_some(("new", json!({ "dao": config.signer.account_id }))),
+    )
+    .send()
+    .await?;
+    Transaction::new(client, token_credentials, config.token_id.clone(), nonce_tracker)
+        .deploy(
+            config.token_wasm.bytes.clone(),
+            accounts.token.needs_initialization.then_some((
+                "new",
+                json!({
+                    "owner_id": config.signer.account_id,
+                    "total_supply": config.total_supply.as_yoctonear().to_string(),
+                    "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
+                    "latest_price": config.initial_price.as_yoctonear().to_string(),
+                }),
+            )),
+        )
+        .send()
+        .await?;
+    if accounts.token.needs_initialization {
+        Transaction::new(
+            client,
+            &config.signer,
+            config.token_id.clone(),
+            nonce_tracker,
+        )
+        .call("owner_set", json!({ "new_owner": config.controller_id }), 1)
+        .send()
+        .await?;
+    }
+    verify_ownership(client, &config.token_id, &config.controller_id).await
 }
 
 pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
@@ -164,102 +280,13 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         println!("dry run: no transactions submitted");
         return Ok(());
     }
-    let mut controller_account = None;
-    let mut token_account = None;
     let mut nonce_tracker = NonceTracker::default();
-    let deployment = async {
-        let controller = ensure_account(
-            &client,
-            config,
-            snapshot,
-            &config.controller_id,
-            &mut nonce_tracker,
-        )
-        .await?;
-        controller_account = Some(controller);
-        let token = ensure_account(
-            &client,
-            config,
-            snapshot,
-            &config.token_id,
-            &mut nonce_tracker,
-        )
-        .await?;
-        token_account = Some(token);
-        let controller_credentials = &controller_account
-            .as_ref()
-            .expect("controller account set")
-            .credentials;
-        let token_credentials = &token_account
-            .as_ref()
-            .expect("token account set")
-            .credentials;
-        Transaction::new(
-            &client,
-            controller_credentials,
-            config.controller_id.clone(),
-            &mut nonce_tracker,
-        )
-        .deploy(
-            config.controller_wasm.bytes.clone(),
-            controller_account
-                .as_ref()
-                .expect("controller account set")
-                .needs_initialization
-                .then_some("new"),
-            json!({ "dao": config.signer.account_id }),
-        )
-        .send()
-        .await?;
-        Transaction::new(
-            &client,
-            token_credentials,
-            config.token_id.clone(),
-            &mut nonce_tracker,
-        )
-        .deploy(
-            config.token_wasm.bytes.clone(),
-            token_account
-                .as_ref()
-                .expect("token account set")
-                .needs_initialization
-                .then_some("new"),
-            json!({
-                "owner_id": config.signer.account_id,
-                "total_supply": config.total_supply.as_yoctonear().to_string(),
-                "metadata": { "spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals },
-                "latest_price": config.initial_price.as_yoctonear().to_string(),
-            }),
-        )
-        .send()
-        .await?;
-        if token_account
-            .as_ref()
-            .expect("token account set")
-            .needs_initialization
-        {
-            Transaction::new(
-                &client,
-                &config.signer,
-                config.token_id.clone(),
-                &mut nonce_tracker,
-            )
-            .call("owner_set", json!({ "new_owner": config.controller_id }), 1)
-            .send()
-            .await?;
-        }
-        verify_ownership(&client, &config.token_id, &config.controller_id).await
-    };
-    if let Err(error) = deployment.await {
+    let accounts = prepare_accounts(&client, config, snapshot, &mut nonce_tracker).await?;
+
+    if let Err(error) = deploy_contracts(&client, config, &accounts, &mut nonce_tracker).await {
         if config.test_mode && !is_unresolved_transaction(&error) {
-            if let Err(cleanup_error) = cleanup_accounts(
-                &client,
-                config,
-                token_account.as_ref(),
-                controller_account.as_ref(),
-                &mut nonce_tracker,
-            )
-            .await
+            if let Err(cleanup_error) =
+                cleanup_created_accounts(&client, config, &accounts, &mut nonce_tracker).await
             {
                 return Err(error.context(format!("cleanup also failed: {cleanup_error}")));
             }
@@ -271,14 +298,7 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         return Err(error);
     }
     if config.test_mode {
-        cleanup_accounts(
-            &client,
-            config,
-            token_account.as_ref(),
-            controller_account.as_ref(),
-            &mut nonce_tracker,
-        )
-        .await?;
+        cleanup_created_accounts(&client, config, &accounts, &mut nonce_tracker).await?;
     }
     Ok(())
 }
