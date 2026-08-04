@@ -31,3 +31,6 @@ yarn-error.log*
 **/target
 
 .direnv/
+
+# aurora-controller-factory checkout created by 'just setup-controller' (PR #9 moves this to .cache/)
+/contracts/

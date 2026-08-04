@@ -1,13 +1,26 @@
 set dotenv-load := true
 
-# Setup aurora-controller if not present
+# Pinned aurora-controller-factory revision.
+# This is *NOT* the audited commit on the reccomendation of the Aurora team
+controller-commit := "351dc02743894ca297e7a6f37aace470098c9630"
+
+# Setup aurora-controller at the pinned commit
 setup-controller:
     #!/usr/bin/env bash
+    set -euo pipefail
     TARGET_DIR="${CARGO_TARGET_DIR:-.}"
-    if [ ! -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
+    DIR="$TARGET_DIR/contracts/aurora-controller-factory"
+    if [ ! -d "$DIR/.git" ]; then
         mkdir -p "$TARGET_DIR/contracts"
-        git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$TARGET_DIR/contracts/aurora-controller-factory"
+        git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$DIR"
     fi
+    if ! git -C "$DIR" diff --quiet || ! git -C "$DIR" diff --cached --quiet; then
+        echo "error: $DIR has local modifications; refusing to build the controller from an unverified tree" >&2
+        exit 1
+    fi
+    # Fetch only if the pinned commit is not already present locally.
+    git -C "$DIR" cat-file -e {{controller-commit}}^{commit} 2>/dev/null || git -C "$DIR" fetch origin
+    git -C "$DIR" checkout --quiet --detach {{controller-commit}}
 
 # Build aurora-controller using cargo make (puts wasm in res/)
 build-controller: setup-controller
