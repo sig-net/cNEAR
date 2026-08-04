@@ -13,7 +13,7 @@ use near_api::types::{
     AccountId as ApiAccountId, Action as ApiAction, CryptoHash as ApiCryptoHash,
     PublicKey as ApiPublicKey, SecretKey as ApiSecretKey,
 };
-use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction};
+use near_api::{NetworkConfig, RPCEndpoint, Signer, Transaction as ApiTransaction};
 use near_api_types::transaction::result::TransactionResult as ApiTransactionResult;
 use near_crypto::{PublicKey, SecretKey};
 use near_gas::NearGas;
@@ -122,10 +122,11 @@ fn api_account_id(account_id: &AccountId) -> Result<ApiAccountId> {
         .with_context(|| format!("could not convert account ID {account_id} for near-api"))
 }
 
-fn api_crypto_hash(hash: CryptoHash) -> Result<ApiCryptoHash> {
-    hash.to_string()
-        .parse()
-        .context("could not convert block hash for near-api")
+/// Convert a `near-primitives` block hash to near-api's own `CryptoHash` type.
+/// Both are transparent `[u8; 32]` wrappers with public fields, so this is a
+/// direct field swap rather than a string round-trip.
+fn api_crypto_hash(hash: CryptoHash) -> ApiCryptoHash {
+    ApiCryptoHash(hash.0)
 }
 
 fn api_secret_key(secret_key: &SecretKey) -> Result<ApiSecretKey> {
@@ -158,7 +159,7 @@ async fn make_transaction(
 ) -> Result<ExecuteSignedTransaction> {
     let api_signer = Signer::from_secret_key(api_secret_key(&signer.secret_key)?)
         .context("could not create near-api signer")?;
-    let mut transaction = Transaction::construct(
+    let mut transaction = ApiTransaction::construct(
         api_account_id(&signer.account_id)?,
         api_account_id(&receiver_id)?,
     );
@@ -172,7 +173,7 @@ async fn make_transaction(
                 .get_public_key()
                 .await
                 .context("could not read near-api public key")?,
-            api_crypto_hash(block_hash)?,
+            api_crypto_hash(block_hash),
             nonce,
         )
         .await
@@ -326,11 +327,9 @@ async fn submit(
             bail!("near-api transaction was not presigned")
         }
     };
-    let tx_hash: CryptoHash = signed
-        .get_hash()
-        .to_string()
-        .parse()
-        .map_err(|error| anyhow!("could not convert near-api transaction hash: {error}"))?;
+    // near-api's CryptoHash and near-primitives' are both transparent `[u8; 32]`
+    // wrappers, so this is a direct field swap, not a string round-trip.
+    let tx_hash: CryptoHash = CryptoHash(signed.get_hash().0);
     let signer_id: AccountId = parse_account_id(signed.transaction.signer_id().as_ref(), "signer")?;
     let result = tokio::time::timeout(
         TRANSACTION_BROADCAST_TIMEOUT,
@@ -429,27 +428,105 @@ pub fn delete_action(beneficiary_id: AccountId) -> Result<ApiAction> {
     }))
 }
 
-pub async fn send_actions(
-    client: &JsonRpcClient,
-    network: &NetworkConfig,
-    signer: &Credentials,
+/// A builder for sending a single batch of actions as one signed transaction.
+///
+/// The receiver and actions are configured explicitly, then `.send().await`
+/// signs and broadcasts exactly once (no automatic retry), reconciling by hash
+/// if the outcome is ambiguous and advancing the local nonce tracker only after
+/// confirmation.
+pub struct Transaction<'a> {
+    client: &'a JsonRpcClient,
+    network: &'a NetworkConfig,
+    signer: &'a Credentials,
     receiver: AccountId,
     actions: Vec<ApiAction>,
+    nonce_tracker: &'a mut NonceTracker,
+}
+
+impl<'a> Transaction<'a> {
+    pub fn new(
+        client: &'a JsonRpcClient,
+        network: &'a NetworkConfig,
+        signer: &'a Credentials,
+        receiver: AccountId,
+        nonce_tracker: &'a mut NonceTracker,
+    ) -> Self {
+        Self {
+            client,
+            network,
+            signer,
+            receiver,
+            actions: Vec::new(),
+            nonce_tracker,
+        }
+    }
+
+    /// Append a single action to the transaction.
+    pub fn add_action(mut self, action: ApiAction) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    /// Replace the action list with the given actions.
+    pub fn actions(mut self, actions: Vec<ApiAction>) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    /// Sign and broadcast exactly once, then reconcile by hash if the outcome is
+    /// ambiguous. Advances the local nonce tracker only after confirmation.
+    pub async fn send(self) -> Result<()> {
+        let nonce = self
+            .nonce_tracker
+            .next_nonce(self.client, self.signer)
+            .await?;
+        let tx = make_transaction(
+            self.signer,
+            self.receiver,
+            nonce,
+            block_hash(self.client).await?,
+            self.actions,
+        )
+        .await?;
+        let result = submit(self.client, tx, self.network).await;
+        match settle_nonce(self.nonce_tracker, self.signer, nonce, result).await? {
+            PostSubmit::NeedsRefresh => {
+                // Reconcile the local value with RPC after an ambiguous broadcast.
+                self.nonce_tracker.refresh(self.client, self.signer).await?;
+            }
+            PostSubmit::Confirmed => {}
+        }
+        Ok(())
+    }
+}
+
+/// What `Transaction::send` must do after the nonce tracker has been settled.
+#[derive(Debug, Eq, PartialEq)]
+enum PostSubmit {
+    Confirmed,
+    NeedsRefresh,
+}
+
+/// Settle the local nonce tracker after a submit outcome. The submit `result`
+/// is injected as a seam so tests can drive every path without touching the
+/// network. The ambiguous path confirms the nonce and asks the caller to
+/// reconcile the tracker with RPC before submitting anything else.
+async fn settle_nonce(
     nonce_tracker: &mut NonceTracker,
-) -> Result<()> {
-    let nonce = nonce_tracker.next_nonce(client, signer).await?;
-    let tx = make_transaction(signer, receiver, nonce, block_hash(client).await?, actions).await?;
-    match submit(client, tx, network).await {
+    signer: &Credentials,
+    nonce: Nonce,
+    result: Result<SubmissionOutcome>,
+) -> Result<PostSubmit> {
+    match result {
         Ok(outcome) => {
             // Only advance after the original transaction has been confirmed. A lagging RPC
             // replica may still report the previous access-key nonce at this point.
             nonce_tracker.confirmed(signer, nonce)?;
             if outcome.was_ambiguous {
-                // Reconcile the local value with RPC after an ambiguous broadcast. merge_rpc_nonce
-                // retains the locally confirmed value if the replica is behind.
-                nonce_tracker.refresh(client, signer).await?;
+                Ok(PostSubmit::NeedsRefresh)
+            } else {
+                Ok(PostSubmit::Confirmed)
             }
-            Ok(())
         }
         Err(error) if is_confirmed_transaction_failure(&error) => {
             // A finalized execution failure consumed the nonce even though the action failed.
@@ -519,8 +596,10 @@ mod tests {
         let TransactionableOrSigned::Signed((signed, _)) = transaction.transaction else {
             panic!("transaction was not presigned");
         };
-        let converted: CryptoHash = signed.get_hash().to_string().parse().unwrap();
-        assert_eq!(converted.to_string(), signed.get_hash().to_string());
+        // The field swap must be lossless in both directions.
+        let converted = CryptoHash(signed.get_hash().0);
+        assert_eq!(converted.0, signed.get_hash().0);
+        assert_eq!(ApiCryptoHash(converted.0).0, signed.get_hash().0);
     }
 
     #[test]
@@ -541,5 +620,120 @@ mod tests {
             })),
         ];
         assert_eq!(actions.len(), 3);
+    }
+
+    fn key(credentials: &Credentials) -> NonceKey {
+        NonceTracker::key(credentials)
+    }
+
+    #[tokio::test]
+    async fn transaction_builder_success_advances_nonce_without_refresh() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "tx-success-test");
+        let credentials = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let mut tracker = NonceTracker::default();
+        tracker.merge_rpc_nonce(&credentials, 7).unwrap();
+        assert_eq!(tracker.next_nonces[&key(&credentials)], 8);
+
+        let post = settle_nonce(
+            &mut tracker,
+            &credentials,
+            8,
+            Ok(SubmissionOutcome {
+                was_ambiguous: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(post, PostSubmit::Confirmed);
+        assert_eq!(tracker.next_nonces[&key(&credentials)], 9);
+    }
+
+    #[tokio::test]
+    async fn transaction_builder_ambiguous_outcome_confirms_then_needs_refresh() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "tx-ambiguous-test");
+        let credentials = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let mut tracker = NonceTracker::default();
+        tracker.merge_rpc_nonce(&credentials, 7).unwrap();
+
+        let post = settle_nonce(
+            &mut tracker,
+            &credentials,
+            8,
+            Ok(SubmissionOutcome {
+                was_ambiguous: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(post, PostSubmit::NeedsRefresh);
+        // The nonce was consumed before the caller's RPC refresh step, so even a later
+        // refresh failure cannot reuse this nonce for another transaction.
+        assert_eq!(tracker.next_nonces[&key(&credentials)], 9);
+        // A lagging replica that still reports the previous nonce must not move the
+        // locally confirmed value backwards.
+        tracker.merge_rpc_nonce(&credentials, 7).unwrap();
+        assert_eq!(tracker.next_nonces[&key(&credentials)], 9);
+    }
+
+    #[tokio::test]
+    async fn transaction_builder_confirmed_failure_consumes_nonce() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "tx-failure-test");
+        let credentials = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let mut tracker = NonceTracker::default();
+        tracker.merge_rpc_nonce(&credentials, 7).unwrap();
+
+        let result = settle_nonce(
+            &mut tracker,
+            &credentials,
+            8,
+            Err(ConfirmedTransactionFailure {
+                tx_hash: CryptoHash::default(),
+                detail: "execution failed".to_string(),
+            }
+            .into()),
+        )
+        .await;
+
+        let error = result.unwrap_err();
+        assert!(is_confirmed_transaction_failure(&error));
+        // A finalized execution failure still consumed the nonce.
+        assert_eq!(tracker.next_nonces[&key(&credentials)], 9);
+    }
+
+    #[tokio::test]
+    async fn transaction_builder_unknown_error_invalidates_nonce() {
+        let secret = SecretKey::from_seed(KeyType::ED25519, "tx-invalidate-test");
+        let credentials = Credentials {
+            account_id: "alice.testnet".parse().unwrap(),
+            secret_key: secret,
+        };
+        let mut tracker = NonceTracker::default();
+        tracker.merge_rpc_nonce(&credentials, 7).unwrap();
+
+        let result = settle_nonce(
+            &mut tracker,
+            &credentials,
+            8,
+            Err(UnresolvedTransaction {
+                tx_hash: CryptoHash::default(),
+            }
+            .into()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        // The cached nonce must never be reused for another transaction.
+        assert!(tracker.next_nonces.is_empty());
     }
 }
