@@ -12,9 +12,13 @@ setup-controller:
 
 # Build aurora-controller by invoking cargo-near directly (the controller's
 # Makefile.toml wraps this same command; cargo-make is not required).
+# CARGO_TARGET_DIR is pinned to the same dir the cnear contract build uses
+# (repo target/ by default, or the env value when set) so the controller
+# shares one dependency cache instead of compiling its own under .cache/.
 build-controller: setup-controller
     #!/usr/bin/env bash
     set -eu
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(pwd)/target}"
     CONTRACT_DIR=".cache/aurora-controller-factory"
     mkdir -p target/near
     cargo near build non-reproducible-wasm \
