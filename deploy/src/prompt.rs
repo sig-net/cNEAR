@@ -1,4 +1,6 @@
-use crate::cli::{Cli, Network, DEFAULT_CONTROLLER_WASM, DEFAULT_TOKEN_WASM};
+use crate::cli::{
+    CleanAccountsArgs, DeployArgs, Network, DEFAULT_CONTROLLER_WASM, DEFAULT_TOKEN_WASM,
+};
 use crate::credentials::select_signer;
 use anyhow::{anyhow, bail, Result};
 use near_token::NearToken;
@@ -54,7 +56,7 @@ fn parse_network(input: &str) -> Result<Network> {
 /// invoked without any flags; mirrors the original `deploy.sh` prompts. Every
 /// value is parsed and validated by the same typed machinery as the matching
 /// CLI flag, and the defaults match the flag defaults.
-pub fn run() -> Result<Cli> {
+pub fn run() -> Result<DeployArgs> {
     println!("=== Deployment Configuration ===");
     println!("Select network:");
     println!("  1) testnet (default)");
@@ -72,10 +74,7 @@ pub fn run() -> Result<Cli> {
         &format!("Token account ID [token.{signer_id}]: "),
         format!("token.{signer_id}"),
     )?;
-    let token_name = prompt_with_default(
-        "Token name [Controlled NEAR]: ",
-        "Controlled NEAR".to_string(),
-    )?;
+    let token_name = prompt_with_default("Token name [cNEAR]: ", "cNEAR".to_string())?;
     let token_symbol = prompt_with_default("Token symbol [cNEAR]: ", "cNEAR".to_string())?;
     let token_decimals = prompt_with_default("Token decimals [24]: ", 24_u8)?;
     let total_supply = prompt_with_default(
@@ -113,7 +112,7 @@ pub fn run() -> Result<Cli> {
         initial_balance.as_yoctonear()
     );
 
-    Ok(Cli {
+    Ok(DeployArgs {
         network,
         signer_id: Some(signer_id.to_string()),
         credentials: None,
@@ -131,6 +130,49 @@ pub fn run() -> Result<Cli> {
         dry_run: false,
         test_mode: false,
         yes: false,
+    })
+}
+
+/// Run the interactive clean-accounts flow. Used when `cnear-deploy clean-accounts`
+/// is invoked without flags. Prompts for network, signer, and account IDs to delete.
+pub fn prompt_clean() -> Result<CleanAccountsArgs> {
+    println!("=== Clean Accounts ===");
+    println!("Select network:");
+    println!("  1) testnet (default)");
+    println!("  2) mainnet");
+    let network = parse_network(&read_line("Enter choice [1]: ")?)?;
+
+    let signer = select_signer(network, None, None)?;
+    let signer_id = signer.account_id;
+
+    let controller_id = prompt_with_default(
+        &format!("Controller account ID to delete [controller.{signer_id}]: "),
+        format!("controller.{signer_id}"),
+    )?;
+    let token_id = prompt_with_default(
+        &format!("Token account ID to delete [token.{signer_id}]: "),
+        format!("token.{signer_id}"),
+    )?;
+    let beneficiary = prompt_with_default(
+        &format!("Beneficiary account (remaining NEAR goes here) [{signer_id}]: "),
+        signer_id.to_string(),
+    )?;
+
+    println!();
+    println!("=== Cleanup Summary ===");
+    println!("network:     {network:?}");
+    println!("signer:      {signer_id}");
+    println!("controller:  {controller_id}");
+    println!("token:       {token_id}");
+    println!("beneficiary: {beneficiary}");
+
+    Ok(CleanAccountsArgs {
+        network,
+        signer_id: Some(signer_id.to_string()),
+        credentials: None,
+        controller_id: Some(controller_id),
+        token_id: Some(token_id),
+        beneficiary: Some(beneficiary),
     })
 }
 

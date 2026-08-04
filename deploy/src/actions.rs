@@ -17,6 +17,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use crate::config::CleanAccountsConfig;
+
 #[derive(Clone, Debug)]
 struct AccountHandle {
     credentials: Credentials,
@@ -63,6 +65,7 @@ async fn ensure_account(
 
     let secret_key = SecretKey::from_random(KeyType::ED25519);
     let credentials = persist_generated_credentials(&path, account_id.clone(), secret_key)?;
+    println!("creating account {account_id}...");
     if let Err(error) = Transaction::new(client, &config.signer, account_id.clone(), nonce_tracker)
         .create_account(config.initial_balance, credentials.secret_key.public_key())
         .send()
@@ -71,6 +74,7 @@ async fn ensure_account(
         let _ = fs::remove_file(&path);
         return Err(error).with_context(|| format!("could not create account {account_id}"));
     }
+    println!("created account {account_id}");
     Ok(AccountHandle {
         credentials,
         created: true,
@@ -89,10 +93,18 @@ async fn cleanup_accounts(
     nonce_tracker: &mut NonceTracker,
 ) -> Result<()> {
     let mut first_error = None;
-    for handle in handles {
-        if !handle.created {
-            continue;
-        }
+    let created: Vec<&AccountHandle> = handles
+        .iter()
+        .copied()
+        .filter(|handle| handle.created)
+        .collect();
+    if created.is_empty() {
+        println!("test mode: no accounts were created by this run; skipping cleanup");
+        return Ok(());
+    }
+    println!("test mode: cleaning up accounts created by this run");
+    for handle in created {
+        println!("deleting {}...", handle.credentials.account_id);
         if let Err(error) = Transaction::new(
             client,
             &handle.credentials,
@@ -110,13 +122,16 @@ async fn cleanup_accounts(
             if unresolved {
                 break;
             }
-        } else if let Some(path) = &handle.credential_path {
-            if let Err(error) = fs::remove_file(path) {
-                first_error.get_or_insert(anyhow!(
-                    "deleted account {} but could not remove generated credential file {}: {error}",
-                    handle.credentials.account_id,
-                    path.display()
-                ));
+        } else {
+            println!("deleted {}", handle.credentials.account_id);
+            if let Some(path) = &handle.credential_path {
+                if let Err(error) = fs::remove_file(path) {
+                    first_error.get_or_insert(anyhow!(
+                        "deleted account {} but could not remove generated credential file {}: {error}",
+                        handle.credentials.account_id,
+                        path.display()
+                    ));
+                }
             }
         }
     }
@@ -195,6 +210,7 @@ async fn deploy_contracts(
 ) -> Result<()> {
     let controller_credentials = &accounts.controller.credentials;
     let token_credentials = &accounts.token.credentials;
+    println!("deploying controller {}", config.controller_id);
     Transaction::new(
         client,
         controller_credentials,
@@ -210,6 +226,7 @@ async fn deploy_contracts(
     )
     .send()
     .await?;
+    println!("deploying token {}", config.token_id);
     Transaction::new(client, token_credentials, config.token_id.clone(), nonce_tracker)
         .deploy(
             config.token_wasm.bytes.clone(),
@@ -226,13 +243,14 @@ async fn deploy_contracts(
         .send()
         .await?;
     if accounts.token.needs_initialization {
+        println!("transferring token ownership to {}", config.controller_id);
         Transaction::new(
             client,
             &config.signer,
             config.token_id.clone(),
             nonce_tracker,
         )
-        .call("owner_set", json!({ "new_owner": config.controller_id }), 1)
+        .call("owner_set", json!({ "new_owner": config.controller_id }), 0)
         .send()
         .await?;
     }
@@ -254,8 +272,14 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         }
     }
     let client = JsonRpcClient::connect(config.network.rpc_url());
+    println!(
+        "querying finalized block from {}...",
+        config.network.rpc_url()
+    );
     let snapshot = finalized_snapshot(&client).await?;
+    println!("checking signer access key...");
     access_key(&client, snapshot.block_reference(), &config.signer).await?;
+    println!("inspecting target accounts...");
     let controller = account(&client, snapshot.block_reference(), &config.controller_id).await?;
     let token = account(&client, snapshot.block_reference(), &config.token_id).await?;
     for (id, state) in [
@@ -281,7 +305,9 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
         return Ok(());
     }
     let mut nonce_tracker = NonceTracker::default();
+    println!("preparing accounts...");
     let accounts = prepare_accounts(&client, config, snapshot, &mut nonce_tracker).await?;
+    println!("deploying contracts...");
 
     if let Err(error) = deploy_contracts(&client, config, &accounts, &mut nonce_tracker).await {
         if config.test_mode && !is_unresolved_transaction(&error) {
@@ -300,5 +326,99 @@ pub async fn deploy(config: &DeploymentConfig) -> Result<()> {
     if config.test_mode {
         cleanup_created_accounts(&client, config, &accounts, &mut nonce_tracker).await?;
     }
+    println!("deployment complete");
     Ok(())
+}
+
+/// Delete the given accounts in order (token first, then controller), sending
+/// remaining balances to the beneficiary. Each account signs its own
+/// DeleteAccount: NEAR requires the account being deleted to authorize the
+/// action, so the full-access credential the deployer persisted for that
+/// account is loaded and used as the signer.
+pub async fn clean_accounts(config: &CleanAccountsConfig) -> Result<()> {
+    println!("network:     {:?}", config.network);
+    println!("signer:      {}", config.signer.account_id);
+    println!("beneficiary: {}", config.beneficiary);
+    for id in &config.account_ids_to_delete {
+        println!("  will delete: {id}");
+    }
+
+    if config.network == Network::Mainnet {
+        print!("Type 'mainnet' to confirm cleanup: ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if input.trim() != "mainnet" {
+            bail!("cleanup not confirmed");
+        }
+    }
+
+    let client = JsonRpcClient::connect(config.network.rpc_url());
+    let mut nonce_tracker = NonceTracker::default();
+    let mut first_error = None;
+
+    for account_id in &config.account_ids_to_delete {
+        // Skip accounts that are already gone so re-running is idempotent.
+        let exists = account(
+            &client,
+            near_primitives::types::BlockReference::Finality(
+                near_primitives::types::Finality::Final,
+            ),
+            account_id,
+        )
+        .await?;
+        if exists.is_none() {
+            println!("skipping {account_id}: account no longer exists");
+            continue;
+        }
+        // NEAR requires the account being deleted to sign its own DeleteAccount.
+        // The deployer persisted a full-access credential for each account it
+        // created, so load that account's own key rather than the signer's. A
+        // missing credential is recorded like any other failure so the remaining
+        // accounts are still attempted.
+        let path = credentials_dir(config.network)?.join(format!("{account_id}.json"));
+        let account_credentials = match load_credentials(&path, Some(account_id)) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                let message = format!(
+                    "account {account_id} must sign its own deletion, but its credential file {} is unavailable: {error}",
+                    path.display()
+                );
+                eprintln!("error deleting {account_id}: {message}");
+                first_error.get_or_insert(anyhow!(message));
+                continue;
+            }
+        };
+        eprintln!("deleting {account_id}...");
+        if let Err(error) = Transaction::new(
+            &client,
+            &account_credentials,
+            account_id.clone(),
+            &mut nonce_tracker,
+        )
+        .delete_account(config.beneficiary.clone())
+        .send()
+        .await
+        {
+            eprintln!("error deleting {account_id}: {error}");
+            let unresolved = is_unresolved_transaction(&error);
+            first_error.get_or_insert(error);
+            if unresolved {
+                break;
+            }
+        } else {
+            println!("deleted {account_id}");
+            // The account no longer exists; drop its stale credential file.
+            if let Err(error) = fs::remove_file(&path) {
+                first_error.get_or_insert(anyhow!(
+                    "deleted account {account_id} but could not remove credential file {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    first_error.map_or(Ok(()), |error| {
+        Err(error).context("one or more cleanup transactions failed")
+    })
 }

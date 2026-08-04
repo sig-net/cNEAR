@@ -1,10 +1,10 @@
 use crate::credentials::Credentials;
 use anyhow::{anyhow, bail, Context, Result};
-pub use near_jsonrpc_client::JsonRpcClient;
-use near_jsonrpc_client::{
-    errors::{JsonRpcError, JsonRpcServerError},
-    methods,
+use near_jsonrpc_client::errors::{
+    JsonRpcError, JsonRpcServerError, JsonRpcTransportSendError, RpcTransportError,
 };
+use near_jsonrpc_client::methods;
+pub use near_jsonrpc_client::JsonRpcClient;
 use near_jsonrpc_primitives::types::query::{QueryResponseKind, RpcQueryError};
 use near_primitives::account::AccessKeyPermission;
 use near_primitives::hash::CryptoHash;
@@ -13,6 +13,31 @@ use near_primitives::views::QueryRequest;
 use serde::Deserialize;
 
 pub type QueryRpcError = JsonRpcError<RpcQueryError>;
+
+/// Upper bound on any single JSON-RPC request so a stalled endpoint surfaces as
+/// a clear error instead of an indefinite silent hang (near-jsonrpc-client
+/// does not set its own HTTP timeout).
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn rpc_call<T, E>(
+    future: impl std::future::Future<Output = std::result::Result<T, JsonRpcError<E>>>,
+) -> std::result::Result<T, JsonRpcError<E>> {
+    tokio::time::timeout(RPC_TIMEOUT, future)
+        .await
+        .map_err(|_| {
+            // TransportError is not parameterized by the handler error type, so a
+            // single variant works for every RPC method.
+            JsonRpcError::TransportError(RpcTransportError::SendError(
+                JsonRpcTransportSendError::PayloadSerializeError(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "NEAR JSON-RPC request timed out after {} seconds",
+                        RPC_TIMEOUT.as_secs()
+                    ),
+                )),
+            ))
+        })?
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AccountView {
@@ -45,34 +70,31 @@ pub async fn query(
     block_reference: BlockReference,
     request: QueryRequest,
 ) -> std::result::Result<QueryResponseKind, QueryRpcError> {
-    client
-        .call(methods::query::RpcQueryRequest {
-            block_reference,
-            request,
-        })
-        .await
-        .map(|response| response.kind)
+    rpc_call(client.call(methods::query::RpcQueryRequest {
+        block_reference,
+        request,
+    }))
+    .await
+    .map(|response| response.kind)
 }
 
 pub async fn finalized_snapshot(client: &JsonRpcClient) -> Result<RpcSnapshot> {
-    let response = client
-        .call(methods::block::RpcBlockRequest {
-            block_reference: BlockReference::Finality(near_primitives::types::Finality::Final),
-        })
-        .await
-        .context("could not query finalized preflight block")?;
+    let response = rpc_call(client.call(methods::block::RpcBlockRequest {
+        block_reference: BlockReference::Finality(near_primitives::types::Finality::Final),
+    }))
+    .await
+    .context("could not query finalized preflight block")?;
     Ok(RpcSnapshot {
         block_hash: response.header.hash,
     })
 }
 
 pub async fn block_hash(client: &JsonRpcClient) -> Result<CryptoHash> {
-    let response = client
-        .call(methods::block::RpcBlockRequest {
-            block_reference: BlockReference::Finality(near_primitives::types::Finality::Final),
-        })
-        .await
-        .context("could not query final block")?;
+    let response = rpc_call(client.call(methods::block::RpcBlockRequest {
+        block_reference: BlockReference::Finality(near_primitives::types::Finality::Final),
+    }))
+    .await
+    .context("could not query final block")?;
     Ok(response.header.hash)
 }
 

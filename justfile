@@ -18,7 +18,6 @@ setup-controller:
 build-controller: setup-controller
     #!/usr/bin/env bash
     set -eu
-    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(pwd)/target}"
     CONTRACT_DIR=".cache/aurora-controller-factory"
     mkdir -p target/near
     cargo near build non-reproducible-wasm \
@@ -28,8 +27,11 @@ build-controller: setup-controller
         --no-abi
     cp "$CONTRACT_DIR/res/aurora_controller_factory.wasm" target/near/aurora-controller-factory.wasm
 
-# Build token contract with wasm-opt
+# Build token contract with wasm-opt. cargo-near invokes nested Cargo commands,
+# so clear any user-level sccache wrapper configuration for this build.
 build-token:
+    #!/usr/bin/env bash
+    set -eu
     cargo near build non-reproducible-wasm
 
 # Build both token and controller
@@ -53,7 +55,6 @@ release: build
 clean:
     #!/usr/bin/env bash
     cargo clean
-    rm -rf target/near/
     if [ -d ".cache/aurora-controller-factory" ]; then
         cargo clean --manifest-path ".cache/aurora-controller-factory/contract/Cargo.toml"
     fi
@@ -71,26 +72,39 @@ fmt:
 all: check build test
 
 # Deploy using the typed Rust binary (no near CLI, eval, or interpolated user arguments).
-# The deploy binary itself provides the complete clap-based option set.
-deploy:
+# `just deploy` with no arguments runs the fully interactive flow. The legacy
+# positional form from deploy.sh is still accepted and mapped inside the binary:
+# `just deploy test` → ephemeral testnet --test-mode, `testnet`/`mainnet` set the
+# network, and a bare signer after the network word becomes --signer-id. All other
+# arguments are forwarded verbatim (subcommand or flags), preserving quoting for
+# values like `--total-supply "10 NEAR"`.
+deploy *ARGS:
     #!/usr/bin/env bash
     set -eu
     just build
-    cargo run --manifest-path deploy/Cargo.toml --
+    cargo run --manifest-path deploy/Cargo.toml -- {{ARGS}}
 
-# Ephemeral testnet deployment with cleanup of accounts created by this run.
+# Ephemeral testnet deployment with cleanup of accounts created by this run
+# (same as `just deploy test`).
 deploy-test:
     #!/usr/bin/env bash
     set -eu
     just build
-    cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode
+    cargo run --manifest-path deploy/Cargo.toml -- deploy --network testnet --test-mode
 
 # Explicit mainnet entrypoint; the binary still requires typed confirmation unless --yes is used directly.
 deploy-mainnet:
     #!/usr/bin/env bash
     set -eu
     just build
-    cargo run --manifest-path deploy/Cargo.toml -- --network mainnet
+    cargo run --manifest-path deploy/Cargo.toml -- deploy --network mainnet
+
+# Delete controller.<signer> and token.<signer> accounts, sending remaining
+# balances to the signer. Prompts for network and signer interactively.
+clean-accounts:
+    #!/usr/bin/env bash
+    set -eu
+    cargo run --manifest-path deploy/Cargo.toml -- clean-accounts
 
 # Help
 help:

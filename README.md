@@ -63,19 +63,30 @@ For an ephemeral testnet deployment, accounts created by this invocation are del
 # Fully interactive deployment (builds contracts, then prompts for everything)
 just deploy
 
-# Build contracts and deploy temporary testnet accounts
-just deploy-test
+# Ephemeral testnet deployment with cleanup of accounts created by this run
+just deploy test        # same as: cnear-deploy deploy --network testnet --test-mode
+just deploy-test        # explicit entrypoint for the same flow
+
+# The legacy deploy.sh positional form is still accepted:
+#   just deploy testnet [signer] [flags...]
+#   just deploy mainnet [signer] [flags...]
+# For example:
+just deploy mainnet your-account.near --dry-run
 
 # For signer selection and all other typed options, invoke the binary directly
-cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode \
+cargo run --manifest-path deploy/Cargo.toml -- deploy --network testnet --test-mode \
   --signer-id your-account.testnet \
   --credentials "$HOME/.near-credentials/testnet/your-account.testnet.json"
 
 # Validate inputs and WASM without submitting transactions
-cargo run --manifest-path deploy/Cargo.toml -- --network testnet --test-mode --dry-run \
+cargo run --manifest-path deploy/Cargo.toml -- deploy --network testnet --test-mode --dry-run \
   --signer-id your-account.testnet \
   --credentials "$HOME/.near-credentials/testnet/your-account.testnet.json"
 ```
+
+The binary also accepts top-level flags without the `deploy` subcommand
+(`cnear-deploy --network testnet --test-mode ...`), which is translated onto the
+typed subcommand form before parsing.
 
 For permanent deployment, specify the network, signer, and credentials explicitly. Mainnet requires typing `mainnet` unless `--yes` is provided deliberately:
 
@@ -83,7 +94,7 @@ For permanent deployment, specify the network, signer, and credentials explicitl
 just deploy-mainnet
 
 # Or pass the complete typed configuration directly
-cargo run --manifest-path deploy/Cargo.toml -- --network mainnet \
+cargo run --manifest-path deploy/Cargo.toml -- deploy --network mainnet \
   --signer-id your-account.near \
   --credentials "$HOME/.near-credentials/mainnet/your-account.near.json"
 ```

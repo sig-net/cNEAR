@@ -1,4 +1,4 @@
-use crate::cli::{Cli, Network};
+use crate::cli::{CleanAccountsArgs, DeployArgs, Network};
 use crate::credentials::{parse_account_id, select_signer, Credentials};
 use anyhow::{bail, Context, Result};
 use near_primitives::types::AccountId;
@@ -54,7 +54,7 @@ fn read_wasm(path: &Path) -> Result<WasmArtifact> {
     })
 }
 
-pub fn build_config(cli: Cli) -> Result<DeploymentConfig> {
+pub fn build_config(cli: DeployArgs) -> Result<DeploymentConfig> {
     if cli.token_decimals == 0 {
         bail!("token decimals must be between 1 and 255");
     }
@@ -97,6 +97,40 @@ pub fn build_config(cli: Cli) -> Result<DeploymentConfig> {
         dry_run: cli.dry_run,
         test_mode: cli.test_mode,
         yes: cli.yes,
+    })
+}
+
+/// Resolve the clean-accounts arguments into a signer and a list of account IDs to delete.
+pub struct CleanAccountsConfig {
+    pub network: Network,
+    pub signer: Credentials,
+    pub account_ids_to_delete: Vec<AccountId>,
+    pub beneficiary: AccountId,
+}
+
+pub fn build_clean_config(cli: CleanAccountsArgs) -> Result<CleanAccountsConfig> {
+    let signer = select_signer(
+        cli.network,
+        cli.signer_id.as_deref(),
+        cli.credentials.as_deref(),
+    )?;
+    let controller_id = match cli.controller_id.as_deref() {
+        Some(value) => parse_account_id(value, "controller")?,
+        None => parse_account_id(&format!("controller.{}", signer.account_id), "controller")?,
+    };
+    let token_id = match cli.token_id.as_deref() {
+        Some(value) => parse_account_id(value, "token")?,
+        None => parse_account_id(&format!("token.{}", signer.account_id), "token")?,
+    };
+    let beneficiary = match cli.beneficiary.as_deref() {
+        Some(value) => parse_account_id(value, "beneficiary")?,
+        None => signer.account_id.clone(),
+    };
+    Ok(CleanAccountsConfig {
+        network: cli.network,
+        signer,
+        account_ids_to_delete: vec![token_id, controller_id],
+        beneficiary,
     })
 }
 

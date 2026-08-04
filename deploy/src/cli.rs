@@ -32,7 +32,16 @@ impl Network {
     name = "cnear-deploy",
     about = "Securely deploy cNEAR contracts without near CLI"
 )]
-pub struct Cli {
+pub enum Cli {
+    /// Deploy cNEAR contracts (default when no subcommand is given)
+    Deploy(DeployArgs),
+    /// Delete accounts and send remaining balances to a beneficiary
+    #[command(aliases = ["clean-up", "delete-accounts"])]
+    CleanAccounts(CleanAccountsArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct DeployArgs {
     #[arg(long, value_enum, default_value_t = Network::Testnet)]
     pub network: Network,
     #[arg(long)]
@@ -81,6 +90,77 @@ pub struct Cli {
     pub yes: bool,
 }
 
+/// Translate the legacy `deploy.sh` positional form onto the typed subcommand
+/// CLI, so `just deploy test`, `just deploy testnet`, `just deploy mainnet`,
+/// and a bare signer after the network word all keep working. The program name
+/// is kept at index 0; an empty argument list is passed through unchanged.
+///
+/// - `test` → `deploy --network testnet --test-mode`
+/// - `testnet`/`mainnet` → `deploy --network <net>`
+/// - a following non-flag word becomes `--signer-id <account>`
+/// - a leading `-` (or unknown word) defaults to the `deploy` subcommand
+/// - `deploy`/`clean-accounts`/`help` are passed through as explicit subcommands
+pub fn translate_legacy_args(args: Vec<String>) -> Vec<String> {
+    let Some(first) = args.get(1).map(String::as_str) else {
+        return args;
+    };
+    let program = args[0].clone();
+    let mut out = Vec::new();
+    match first {
+        "test" => {
+            out.extend([
+                program,
+                "deploy".into(),
+                "--network".into(),
+                "testnet".into(),
+                "--test-mode".into(),
+            ]);
+        }
+        "testnet" | "mainnet" => {
+            out.extend([program, "deploy".into(), "--network".into(), first.into()]);
+        }
+        // Explicit subcommands (including the clean-accounts aliases) pass through.
+        "deploy" | "clean-accounts" | "clean-up" | "delete-accounts" | "help" => {
+            return args;
+        }
+        _ => {
+            // Unknown word: a bare account is treated as the signer; a leading
+            // flag defaults to the deploy subcommand so typed flags work.
+            out.push(program);
+            out.push("deploy".into());
+            if !first.starts_with('-') {
+                out.push("--signer-id".into());
+            }
+            out.extend(args.iter().skip(1).cloned());
+            return out;
+        }
+    }
+    // Optional bare signer (non-flag) after the network word → --signer-id.
+    for rest in args.iter().skip(2) {
+        if !rest.starts_with('-') && !out.iter().any(|arg| arg == "--signer-id") {
+            out.push("--signer-id".into());
+        }
+        out.push(rest.clone());
+    }
+    out
+}
+
+#[derive(Parser, Debug)]
+pub struct CleanAccountsArgs {
+    #[arg(long, value_enum, default_value_t = Network::Testnet)]
+    pub network: Network,
+    #[arg(long)]
+    pub signer_id: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub credentials: Option<PathBuf>,
+    #[arg(long)]
+    pub controller_id: Option<String>,
+    #[arg(long)]
+    pub token_id: Option<String>,
+    #[arg(long)]
+    pub beneficiary: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,16 +180,19 @@ mod tests {
     #[test]
     fn cli_defaults_are_sane() {
         use clap::Parser;
-        let cli = Cli::parse_from(["cnear-deploy"]);
-        assert_eq!(cli.network, Network::Testnet);
-        assert_eq!(cli.token_symbol, "cNEAR");
-        assert_eq!(cli.token_decimals, 24);
+        let cli = Cli::parse_from(["cnear-deploy", "deploy"]);
+        let Cli::Deploy(ref args) = cli else {
+            panic!("expected Deploy variant")
+        };
+        assert_eq!(args.network, Network::Testnet);
+        assert_eq!(args.token_symbol, "cNEAR");
+        assert_eq!(args.token_decimals, 24);
         assert_eq!(
-            cli.total_supply,
+            args.total_supply,
             NearToken::from_yoctonear(1_000_000_000_000_000)
         );
-        assert_eq!(cli.initial_price, NearToken::from_near(1));
-        assert_eq!(cli.initial_balance, NearToken::from_near(10));
+        assert_eq!(args.initial_price, NearToken::from_near(1));
+        assert_eq!(args.initial_balance, NearToken::from_near(10));
     }
 
     #[test]
@@ -117,6 +200,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::parse_from([
             "cnear-deploy",
+            "deploy",
             "--total-supply",
             "0.000000001 NEAR",
             "--initial-price",
@@ -124,11 +208,107 @@ mod tests {
             "--initial-balance",
             "0.5 N",
         ]);
+        let Cli::Deploy(ref args) = cli else {
+            panic!("expected Deploy variant")
+        };
         assert_eq!(
-            cli.total_supply,
+            args.total_supply,
             NearToken::from_yoctonear(1_000_000_000_000_000)
         );
-        assert_eq!(cli.initial_price, NearToken::from_near(1));
-        assert_eq!(cli.initial_balance, NearToken::from_millinear(500));
+        assert_eq!(args.initial_price, NearToken::from_near(1));
+        assert_eq!(args.initial_balance, NearToken::from_millinear(500));
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_test_maps_to_ephemeral_testnet() {
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "test"])),
+            argv(&[
+                "cnear-deploy",
+                "deploy",
+                "--network",
+                "testnet",
+                "--test-mode"
+            ])
+        );
+        assert_eq!(
+            translate_legacy_args(argv(&[
+                "cnear-deploy",
+                "test",
+                "alice.testnet",
+                "--dry-run"
+            ])),
+            argv(&[
+                "cnear-deploy",
+                "deploy",
+                "--network",
+                "testnet",
+                "--test-mode",
+                "--signer-id",
+                "alice.testnet",
+                "--dry-run"
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_network_words_map_to_typed_network() {
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "testnet"])),
+            argv(&["cnear-deploy", "deploy", "--network", "testnet"])
+        );
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "mainnet"])),
+            argv(&["cnear-deploy", "deploy", "--network", "mainnet"])
+        );
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "mainnet", "bob.near", "--dry-run"])),
+            argv(&[
+                "cnear-deploy",
+                "deploy",
+                "--network",
+                "mainnet",
+                "--signer-id",
+                "bob.near",
+                "--dry-run"
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_flags_and_subcommands_pass_through() {
+        // Explicit subcommands are untouched.
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "clean-accounts"])),
+            argv(&["cnear-deploy", "clean-accounts"])
+        );
+        // Aliases of clean-accounts also pass through untouched.
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "clean-up"])),
+            argv(&["cnear-deploy", "clean-up"])
+        );
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "deploy", "--yes"])),
+            argv(&["cnear-deploy", "deploy", "--yes"])
+        );
+        // A leading flag defaults to the deploy subcommand.
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "--network", "mainnet", "--yes"])),
+            argv(&["cnear-deploy", "deploy", "--network", "mainnet", "--yes"])
+        );
+        // A bare account without a network word is treated as the signer.
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy", "alice.testnet"])),
+            argv(&["cnear-deploy", "deploy", "--signer-id", "alice.testnet"])
+        );
+        // No arguments at all are passed through.
+        assert_eq!(
+            translate_legacy_args(argv(&["cnear-deploy"])),
+            argv(&["cnear-deploy"])
+        );
     }
 }
