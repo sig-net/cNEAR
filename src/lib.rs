@@ -814,7 +814,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
 
         assert_eq!(
             contract.ft_balance_of(owner()).0,
@@ -842,7 +842,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(owner(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(owner(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -863,7 +863,7 @@ mod tests {
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
 
-        contract.ft_transfer_call(user1(), 0.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), 0.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -885,7 +885,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -899,7 +899,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -913,7 +913,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -935,7 +935,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY + 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
     #[should_panic]
     #[test]
@@ -957,7 +957,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     fn register_user(
@@ -1167,7 +1167,7 @@ mod tests {
             .predecessor_account_id(owner())
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
     }
 
     #[test]
@@ -1294,6 +1294,6 @@ mod tests {
             .predecessor_account_id(owner())
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
     }
 }

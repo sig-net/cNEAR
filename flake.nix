@@ -24,7 +24,7 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = pkgs.rust-bin.stable."1.86.0".default.override {
+        rustToolchain = pkgs.rust-bin.stable."1.93.0".default.override {
           targets = [ "wasm32-unknown-unknown" ];
         };
       in

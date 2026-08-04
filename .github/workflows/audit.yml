@@ -1,0 +1,35 @@
+name: Security audit
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+  # New advisories appear without code changes; scan the lockfile daily and
+  # open a GitHub issue when a scheduled run finds a new vulnerability.
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Fail the PR if Cargo.lock is not fully up to date with the newest
+  # compatible (MSRV-respecting) versions of every dependency.
+  lockfile-fresh:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check dependencies are up to date
+        run: cargo update --locked

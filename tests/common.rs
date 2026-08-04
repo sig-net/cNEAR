@@ -12,17 +12,17 @@ const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://
 pub const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
 static FUNGIBLE_TOKEN_CONTRACT_WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
-    let artifact = cargo_near_build::build(BuildOpts {
+    let artifact_path = cargo_near_build::build_with_cli(BuildOpts {
         no_abi: true,
         no_embed_abi: true,
         ..Default::default()
     })
     .expect("Could not compile Fungible Token contract for tests");
 
-    std::fs::read(&artifact.path).unwrap_or_else(|_| {
+    std::fs::read(&artifact_path).unwrap_or_else(|_| {
         panic!(
             "Could not read Fungible Token WASM file from {}",
-            artifact.path
+            artifact_path
         )
     })
 });
