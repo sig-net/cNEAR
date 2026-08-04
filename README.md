@@ -17,7 +17,7 @@ This is a standard FT contract that additionally:
 - **Upgradeable** - Owner can upgrade contract code
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
 - **Access control** - Role-based permissions using near-plugins AccessControllable
-- **Automated deployment** - Smart deployment script that auto-creates accounts and handles ownership transfer
+- **Automated deployment** - Interactive Rust CLI using near-workspaces; it auto-creates accounts, deploys atomically with initialization, and handles ownership transfer
 
 ## How to Build Locally?
 
@@ -103,12 +103,14 @@ just deploy mainnet your-account.near --dry-run
 - Initial balance for new accounts (default: 10 NEAR)
 
 **Production deployment flow:**
-1. Checks if controller account exists, creates if needed
-2. Checks if token account exists, creates if needed
-3. Deploys controller contract
-4. Deploys token contract with signer as initial owner
-5. Transfers token ownership to controller
-6. Verifies ownership
+1. Checks if controller account exists, creates if needed, and stores newly generated account credentials locally
+2. Checks if token account exists, creates if needed, and stores newly generated account credentials locally
+3. Atomically deploys and initializes the controller contract
+4. Atomically deploys and initializes the token contract with the signer as initial owner
+5. Transfers token ownership to the controller via a plain `owner_set` call (the method is not `#[payable]`, so no deposit is attached)
+6. Verifies ownership through a view call
+
+The CLI uses the selected signer credentials from `NEAR_CREDENTIALS/<network>/` (or `~/.near-credentials/<network>/`). For existing deployment accounts, matching credential files are required; the CLI never uses a credential file without verifying that its embedded account ID matches the requested account. Test-mode cleanup deletes the token before the controller and attempts cleanup if a later deployment step fails.
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`

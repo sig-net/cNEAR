@@ -18,4 +18,6 @@ jobs:
       - name: Build contracts
         run: just build
       - name: Run tests
-        run: cargo test
+        # --locked keeps the MSRV pins (time/deflate64/tempfile/schemars) and near-workspaces
+        # 0.21.0 intact; a stray `cargo update` would break the build on the pinned 1.86 toolchain.
+        run: cargo test --locked
