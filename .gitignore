@@ -30,4 +30,7 @@ yarn-error.log*
 
 **/target
 
+# repo-local caches (controller clone, etc.)
+.cache/
+
 .direnv/

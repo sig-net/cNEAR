@@ -1,12 +1,13 @@
 set dotenv-load := true
 
-# Setup aurora-controller if not present
+# Setup aurora-controller if not present (downloaded into the repo-local
+# .cache directory, which is gitignored).
 setup-controller:
     #!/usr/bin/env bash
-    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
-    if [ ! -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
-        mkdir -p "$TARGET_DIR/contracts"
-        git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$TARGET_DIR/contracts/aurora-controller-factory"
+    set -eu
+    if [ ! -d ".cache/aurora-controller-factory" ]; then
+        mkdir -p .cache
+        git clone https://github.com/aurora-is-near/aurora-controller-factory.git .cache/aurora-controller-factory
     fi
 
 # Build aurora-controller by invoking cargo-near directly (the controller's
@@ -14,8 +15,7 @@ setup-controller:
 build-controller: setup-controller
     #!/usr/bin/env bash
     set -eu
-    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
-    CONTRACT_DIR="$TARGET_DIR/contracts/aurora-controller-factory"
+    CONTRACT_DIR=".cache/aurora-controller-factory"
     mkdir -p target/near
     cargo near build non-reproducible-wasm \
         --manifest-path "$CONTRACT_DIR/contract/Cargo.toml" \
@@ -45,14 +45,13 @@ test: test-unit test-integration
 # Build for release
 release: build
 
-# Clean build artifacts
+# Clean build artifacts (leaves the .cache/ controller clone in place)
 clean:
     #!/usr/bin/env bash
     cargo clean
-    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
     rm -rf target/near/
-    if [ -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
-        cargo clean --manifest-path "$TARGET_DIR/contracts/aurora-controller-factory/contract/Cargo.toml"
+    if [ -d ".cache/aurora-controller-factory" ]; then
+        cargo clean --manifest-path ".cache/aurora-controller-factory/contract/Cargo.toml"
     fi
 
 # Check code
