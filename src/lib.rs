@@ -97,6 +97,7 @@ impl Contract {
         this
     }
 
+    /// Pause all *non-owner* token transfers (`ft_transfer`, `ft_transfer_call`). Pausing does not restrict owner-only methods such as [`Self::force_ft_transfer`] since the owner can always unpause.
     #[access_control_any(roles(Role::Owner))]
     pub fn pause(&mut self) {
         self.paused = true;
@@ -124,6 +125,7 @@ impl Contract {
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
+    /// Freeze an account, blocking it from *non-owner* transfer methods. Like [`Self::pause`], the owner can still move the frozen account's funds via [`Self::force_ft_transfer`]
     #[access_control_any(roles(Role::Owner))]
     pub fn freeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.insert(account_id);
@@ -173,6 +175,7 @@ impl Contract {
         acl.grant_role_unchecked(Role::Owner, owner);
     }
 
+    /// Owner-only transfer between arbitrary accounts. Not subject to the pause and freeze controls.
     #[payable]
     #[access_control_any(roles(Role::Owner))]
     pub fn force_ft_transfer(

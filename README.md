@@ -11,9 +11,9 @@ This is a standard FT contract that additionally:
 ## Features
 
 - **Standard FT functionality** - Full NEP-141 fungible token implementation
-- **Pausable** - Owner can pause/unpause all token transfers
-- **Account freezing** - Owner can freeze individual accounts to prevent their transfers
-- **Force transfers** - Owner can move tokens between any accounts
+- **Pausable** - Owner can pause/unpause all token transfers. Pausing (like freezing) only restricts non-owner methods
+- **Account freezing** - Owner can freeze individual accounts to prevent their transfers, the owner's own methods (e.g. force transfer) are never blocked
+- **Force transfers** - Owner can move tokens between any accounts, regardless of pause or freeze state
 - **Upgradeable** - Owner can upgrade contract code
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
 - **Access control** - Role-based permissions using near-plugins AccessControllable
