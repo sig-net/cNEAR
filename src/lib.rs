@@ -198,9 +198,10 @@ impl Contract {
     ///
     /// The arguments are Borsh-encoded, matching the interface the Aurora
     /// controller calls (`code`, `state_migration_gas`).
+    #[payable]
     #[only(owner)]
     pub fn upgrade(
-        &self,
+        &mut self,
         #[serializer(borsh)] code: Vec<u8>,
         #[serializer(borsh)] state_migration_gas: Option<u64>,
     ) -> Promise {
