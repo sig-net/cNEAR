@@ -5,13 +5,19 @@ NOTES:
   - JSON calls should pass U128 as a base-10 string. E.g. "100".
   - The contract optimizes the inner trie structure by hashing account IDs. It will prevent some
     abuse of deep tries. Shouldn't be an issue, once NEAR clients implement full hashing of keys.
-  - The contract tracks the change in storage before and after the call. If the storage increases,
+  - For the standard NEP-141 storage-management methods, the contract tracks the change in storage
+    before and after the call. If the storage increases,
     the contract requires the caller of the contract to attach enough deposit to the function call
     to cover the storage cost.
     This is done to prevent a denial of service attack on the contract by taking all available storage.
     If the storage decreases, the contract will issue a refund for the cost of the released storage.
     The unused tokens from the attached deposit are also refunded, so it's safe to
     attach more deposit than required.
+  - The cNEAR-specific freeze list is the exception: `freeze_account` is not payable and its storage
+    is funded from the contract account's own balance, not by the caller. `unfreeze_account` releases
+    that stake back to the contract and refunds nobody. The freeze list is therefore bounded by the
+    contract's available NEAR balance: if it runs out, further freezes fail until the account is
+    topped up. Deploy with a reserve and monitor it — see "Errata" in README.md for the numbers.
   - To prevent the deployed contract from being modified or deleted, it should not have any access
     keys on its account.
 */
@@ -177,6 +183,10 @@ impl Contract {
 
     /// Freeze an account, blocking it from *non-owner* transfer methods. Like [`Self::pause`], the owner can still move the frozen account's funds via [`Self::force_ft_transfer`]
     /// Emits an `AccountFrozen` event on every successful call, even if already frozen.
+    ///
+    /// Each newly frozen account locks ~0.0005–0.0011 NEAR of the *contract's* balance for
+    /// storage (the caller pays nothing). Freezes fail once that balance is exhausted, so keep
+    /// the contract funded — see "Errata" in README.md.
     #[access_control_any(roles(Role::Owner))]
     pub fn freeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.insert(account_id.clone());
