@@ -3,12 +3,12 @@ pub mod common;
 use near_sdk::{json_types::U128, NearToken};
 use near_workspaces::operations::Function;
 
-use common::{init_accounts, init_contracts, register_user, ONE_YOCTO};
+use common::{init_accounts, init_contracts, register_user, ONE_YOCTO, TOTAL_SUPPLY};
 
 #[tokio::test]
 async fn simple_transfer() -> anyhow::Result<()> {
     // Create balance variables
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -45,7 +45,7 @@ async fn simple_transfer() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn transfer_call_sender_cannot_unregister_to_burn() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -104,7 +104,7 @@ async fn transfer_call_sender_cannot_unregister_to_burn() -> anyhow::Result<()> 
 
 #[tokio::test]
 async fn transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -150,7 +150,7 @@ async fn transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<(
 
 #[tokio::test]
 async fn transfer_call_when_called_contract_not_registered_with_ft() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -194,7 +194,7 @@ async fn transfer_call_when_called_contract_not_registered_with_ft() -> anyhow::
 
 #[tokio::test]
 async fn transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let refund_amount = U128::from(NearToken::from_near(50).as_yoctonear());
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
@@ -243,7 +243,7 @@ async fn transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn transfer_call_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;

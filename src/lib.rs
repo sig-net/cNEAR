@@ -485,8 +485,13 @@ mod tests {
 
     use super::*;
 
-    const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000;
-    const INITIAL_PRICE: u128 = 1612;
+    const ONE_NEAR: u128 = NearToken::from_near(1).as_yoctonear();
+
+    // Production values - keep in sync with the deployment defaults.
+    // 100 trillion tokens at 24 decimals.
+    const TOTAL_SUPPLY: Balance = 100_000_000_000_000 * ONE_NEAR;
+    // 1 NEAR per token, in yoctoNEAR.
+    const INITIAL_PRICE: u128 = ONE_NEAR;
 
     fn current() -> AccountId {
         accounts(0)

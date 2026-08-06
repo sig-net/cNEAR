@@ -2,7 +2,11 @@ use near_sdk::serde_json::json;
 use near_workspaces::types::NearToken;
 use std::path::PathBuf;
 
-const INITIAL_PRICE: u128 = 1612;
+const ONE_NEAR: u128 = NearToken::from_near(1).as_yoctonear();
+
+// Production values - keep in sync with the deployment defaults.
+const TOTAL_SUPPLY: u128 = 100_000_000_000_000 * ONE_NEAR;
+const INITIAL_PRICE: u128 = ONE_NEAR;
 
 /// Resolve wasm path - check CARGO_TARGET_DIR, fallback to ./target
 fn get_wasm_path(contract_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -35,7 +39,7 @@ async fn deploy_token(
         .call(token.id(), "new")
         .args_json(json!({
             "owner_id": token_owner_id,
-            "total_supply": "1000000000000000",
+            "total_supply": TOTAL_SUPPLY.to_string(),
             "metadata": {
                 "spec": "ft-1.0.0",
                 "name": "Test",
@@ -112,7 +116,7 @@ async fn deploy_token_via_controller(
             "init_method": "new",
             "init_args": {
                 "owner_id": controller.id(),
-                "total_supply": "1000000000000000",
+                "total_supply": TOTAL_SUPPLY.to_string(),
                 "metadata": {
                     "spec": "ft-1.0.0",
                     "name": "Test",
