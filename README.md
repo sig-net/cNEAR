@@ -16,7 +16,7 @@ This is a standard FT contract that additionally:
 - **Force transfers** - Owner can move tokens between any accounts, regardless of pause or freeze state
 - **Upgradeable** - Owner can upgrade contract code
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
-- **Access control** - Role-based permissions using near-plugins AccessControllable
+- **Single owner** - exactly one account is the owner at any time, and `owner_get` is the only source of truth. Ownership transfer is two-step (propose, then the new owner accepts), so it can never be handed to an account that cannot act
 - **Automated deployment** - Smart deployment script that auto-creates accounts and handles ownership transfer
 - **No burn through storage_unregister** - unlike the NEP-145 reference behaviour, `storage_unregister` with `force: true` will not burn a positive balance. Transfer the balance out first, then unregister
 
@@ -71,11 +71,12 @@ just deploy test your-account.testnet --dry-run
 3. Creates `token.<signer>.testnet` subaccount (10 NEAR)
 4. Deploys controller contract
 5. Deploys token contract with signer as initial owner
-6. Transfers token ownership to controller
-7. Verifies ownership
-8. **Deletes both accounts and returns funds to signer**
+6. Proposes the controller as the token's new owner
+7. Has the controller accept ownership (via `delegate_execution`)
+8. Verifies ownership
+9. **Deletes both accounts and returns funds to signer**
 
-This is ideal for testing the deployment flow without leaving accounts on testnet.
+This tests the deployment flow without leaving accounts on testnet.
 
 ### Production Deployment (Mainnet)
 
@@ -108,8 +109,9 @@ just deploy mainnet your-account.near --dry-run
 2. Checks if token account exists, creates if needed
 3. Deploys controller contract
 4. Deploys token contract with signer as initial owner
-5. Transfers token ownership to controller
-6. Verifies ownership
+5. Proposes the controller as the token's new owner
+6. Has the controller accept ownership (via `delegate_execution`)
+7. Verifies ownership
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`
@@ -171,7 +173,7 @@ near call <contract-account-id> ft_transfer '{"receiver_id": "<account-id>", "am
 
 ```bash
 # Pause contract (owner only)
-near call <contract-account-id> pause --accountId <owner-account-id>
+near call <contract-account-id> pause_contract --accountId <owner-account-id>
 
 # Unpause contract (owner only)
 near call <contract-account-id> unpause --accountId <owner-account-id>
@@ -191,8 +193,17 @@ near call <contract-account-id> force_ft_transfer '{"sender_id": "<from-account>
 # Set latest price (owner only)
 near call <contract-account-id> set_latest_price '{"price": "1000000000000000000000000"}' --accountId <owner-account-id>
 
-# Transfer ownership (owner only)
+# Transfer ownership - step 1: the current owner proposes (owner only).
+# This does NOT move ownership yet.
 near call <contract-account-id> owner_set '{"new_owner": "<new-owner-account-id>"}' --accountId <owner-account-id>
+
+# Transfer ownership - step 2: the proposed account accepts, completing the
+# transfer. Only that account can call this.
+near call <contract-account-id> owner_accept --accountId <new-owner-account-id>
+
+# Inspect or abandon a pending transfer
+near view <contract-account-id> pending_owner_get
+near call <contract-account-id> owner_cancel_transfer --accountId <owner-account-id>
 ```
 
 ## Controller integration
@@ -205,6 +216,11 @@ near call <controller-id> delegate_pause '{"receiver_id": "<token-id>", "pause_m
 
 # Freeze via controller  
 near call <controller-id> delegate_execution '{"receiver_id": "<token-id>", "actions": [{"function_name": "freeze_account", "arguments": "<base64-encoded-args>", "amount": "0", "gas": "5000000000000"}]}' --accountId <dao-account> --amount 0.000000000000000000000001
+
+# Accept ownership via controller. Needed once, after the token proposes the
+# controller as its new owner: ownership only moves when the controller itself
+# accepts, which proves it can act on the token.
+near call <controller-id> delegate_execution '{"receiver_id": "<token-id>", "actions": [{"function_name": "owner_accept", "arguments": "", "amount": "0", "gas": "20000000000000"}]}' --accountId <dao-account> --amount 0.000000000000000000000001
 
 # Upgrade via controller
 # 1. Add release info

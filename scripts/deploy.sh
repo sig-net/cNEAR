@@ -319,14 +319,25 @@ DEPLOY_TOKEN_CMD="$NEAR_CMD deploy $TOKEN_ID $TOKEN_WASM --initFunction new --in
 
 run_cmd "$DEPLOY_TOKEN_CMD"
 
-# Step 3: Transfer token ownership to controller
-echo -e "${GREEN}=== Step 3: Transfer Token Ownership to Controller ===${NC}"
+# Step 3: Propose the controller as the token's new owner.
+# Ownership transfer is two-step: this only records the proposal, the
+# controller has to accept it in step 4.
+echo -e "${GREEN}=== Step 3: Propose Controller as Token Owner ===${NC}"
 TRANSFER_OWNERSHIP_CMD="$NEAR_CMD call $TOKEN_ID owner_set '{\"new_owner\":\"$CONTROLLER_ID\"}' --accountId $SIGNER_ID --networkId $NETWORK"
 
 run_cmd "$TRANSFER_OWNERSHIP_CMD"
 
-# Step 4: Verify ownership
-echo -e "${GREEN}=== Step 4: Verify Ownership ===${NC}"
+# Step 4: Have the controller accept ownership.
+# Only the proposed account can accept, so this doubles as proof that the DAO
+# can actually drive the controller, and the controller the token, before
+# ownership becomes final.
+echo -e "${GREEN}=== Step 4: Accept Token Ownership as Controller ===${NC}"
+ACCEPT_OWNERSHIP_CMD="$NEAR_CMD call $CONTROLLER_ID delegate_execution '{\"receiver_id\":\"$TOKEN_ID\",\"actions\":[{\"function_name\":\"owner_accept\",\"arguments\":\"\",\"amount\":\"0\",\"gas\":\"20000000000000\"}]}' --accountId $SIGNER_ID --networkId $NETWORK --amount 0.000000000000000000000001 --gas 100000000000000"
+
+run_cmd "$ACCEPT_OWNERSHIP_CMD"
+
+# Step 5: Verify ownership
+echo -e "${GREEN}=== Step 5: Verify Ownership ===${NC}"
 VERIFY_CMD="$NEAR_CMD view $TOKEN_ID owner_get '{}' --networkId $NETWORK"
 
 if [[ "$DRY_RUN" == "false" ]]; then

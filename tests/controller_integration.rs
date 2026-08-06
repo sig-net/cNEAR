@@ -612,7 +612,7 @@ async fn test_controller_with_token() -> Result<(), Box<dyn std::error::Error>> 
     );
 
     // Verify owner checks work: deployer (owner account) should NOT be able to pause
-    let pause_result = owner.call(token.id(), "pause").transact().await;
+    let pause_result = owner.call(token.id(), "pause_contract").transact().await;
 
     // This should fail because owner != controller
     assert!(
