@@ -53,7 +53,8 @@ async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
     assert!(contract_balance_diff > NearToken::from_near(0));
     assert!(
         contract_balance_diff < NearToken::from_millinear(2),
-        "contract_balance_diff = {} yocto", contract_balance_diff.as_yoctonear()
+        "contract_balance_diff = {} yocto",
+        contract_balance_diff.as_yoctonear()
     );
 
     Ok(())
@@ -99,7 +100,9 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
     assert!(new_account_balance_diff > minimal_deposit);
     assert!(
         new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1)),
-        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto", new_account_balance_diff.as_yoctonear(), minimal_deposit.as_yoctonear()
+        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        new_account_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     let contract_balance_diff = ft_contract
@@ -111,9 +114,10 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
     assert!(contract_balance_diff > minimal_deposit);
     // adjust the upper limit of the assertion to be more flexible for small variations in the gas reward received
     assert!(
-        contract_balance_diff
-            < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
-        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto", contract_balance_diff.as_yoctonear(), minimal_deposit.as_yoctonear()
+        contract_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
+        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        contract_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     Ok(())
@@ -216,7 +220,9 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
     assert!(new_account_balance_diff > minimal_deposit);
     assert!(
         new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1)),
-        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto", new_account_balance_diff.as_yoctonear(), minimal_deposit.as_yoctonear()
+        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        new_account_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     let contract_balance_diff = ft_contract
@@ -227,9 +233,10 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
     // contract receives a gas rewards for the function call, so the difference should be slightly more than minimal_deposit
     assert!(contract_balance_diff > minimal_deposit);
     assert!(
-        contract_balance_diff
-            < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
-        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto", contract_balance_diff.as_yoctonear(), minimal_deposit.as_yoctonear()
+        contract_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
+        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        contract_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     Ok(())
