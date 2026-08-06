@@ -18,6 +18,7 @@ This is a standard FT contract that additionally:
 - **Controller integration** - Designed to work with aurora-controller-factory for DAO-controlled operations
 - **Access control** - Role-based permissions using near-plugins AccessControllable
 - **Automated deployment** - Smart deployment script that auto-creates accounts and handles ownership transfer
+- **No burn through storage_unregister** - unlike the NEP-145 reference behaviour, `storage_unregister` with `force: true` will not burn a positive balance. Transfer the balance out first, then unregister
 
 ## How to Build Locally?
 

@@ -272,25 +272,20 @@ async fn close_account_non_empty_balance() -> anyhow::Result<()> {
     let (alice, _, _, _) = init_accounts(&root).await?;
     let (ft_contract, _) = init_contracts(&worker, initial_balance, &alice).await?;
 
-    let res = ft_contract
-        .call("storage_unregister")
-        .args_json((Option::<bool>::None,))
-        .max_gas()
-        .deposit(ONE_YOCTO)
-        .transact()
-        .await?;
-    assert!(format!("{:?}", res)
-        .contains("Can't unregister the account with the positive balance without force"));
-
-    let res = ft_contract
-        .call("storage_unregister")
-        .args_json((Some(false),))
-        .max_gas()
-        .deposit(ONE_YOCTO)
-        .transact()
-        .await?;
-    assert!(format!("{:?}", res)
-        .contains("Can't unregister the account with the positive balance without force"));
+    // Neither the default nor an explicit `force: false` may close an account
+    // that still holds tokens.
+    for force in [Option::<bool>::None, Some(false)] {
+        let res = ft_contract
+            .call("storage_unregister")
+            .args_json((force,))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(
+            format!("{:?}", res).contains("cannot unregister an account that still holds cNEAR")
+        );
+    }
 
     Ok(())
 }
@@ -304,6 +299,8 @@ async fn close_account_force_non_empty_balance() -> anyhow::Result<()> {
     let (alice, _, _, _) = init_accounts(&root).await?;
     let (ft_contract, _) = init_contracts(&worker, initial_balance, &alice).await?;
 
+    // `force: true` must NOT destroy the balance: a frozen holder could
+    // otherwise zero out the balance the owner needs to recover.
     let res = ft_contract
         .call("storage_unregister")
         .args_json((Some(true),))
@@ -311,10 +308,19 @@ async fn close_account_force_non_empty_balance() -> anyhow::Result<()> {
         .deposit(ONE_YOCTO)
         .transact()
         .await?;
-    assert!(res.is_success());
+    assert!(
+        res.is_failure(),
+        "force-unregister must not burn a balance: {:#?}",
+        res
+    );
+    assert!(format!("{:?}", res).contains("cannot unregister an account that still holds cNEAR"));
 
     let res = ft_contract.call("ft_total_supply").view().await?;
-    assert_eq!(res.json::<U128>()?.0, 0);
+    assert_eq!(
+        res.json::<U128>()?,
+        initial_balance,
+        "the balance must not have been burned"
+    );
 
     Ok(())
 }

@@ -388,8 +388,15 @@ impl StorageManagement for Contract {
         self.token.storage_withdraw(amount)
     }
 
+    /// Unregister the caller and release their storage deposit.
+    ///
+    /// Unlike the NEP-145 reference behaviour, `force` does **not** let a caller destroy their balance. This is because we don't want people to be able to zero out frozen accounts.
     #[payable]
     fn storage_unregister(&mut self, force: Option<bool>) -> bool {
+        require!(
+            self.token.ft_balance_of(env::predecessor_account_id()).0 == 0,
+            "cannot unregister an account that still holds cNEAR: transfer the balance out first"
+        );
         #[allow(unused_variables)]
         if let Some((account_id, balance)) = self.token.internal_storage_unregister(force) {
             log!("Closed @{} with {}", account_id, balance);
@@ -665,8 +672,9 @@ mod tests {
         contract.storage_unregister(None);
     }
 
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
     #[test]
-    fn test_unregister_with_force() {
+    fn test_unregister_with_force_cannot_burn_balance() {
         let (mut contract, mut context) = setup();
 
         testing_env!(context
@@ -691,13 +699,82 @@ mod tests {
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
 
-        // force to unregister no matter what
-        // this reduces total supply because user's tokens are burnt
+        // `force` must NOT destroy a positive balance: otherwise a frozen
+        // holder could zero out the balance the owner needs to recover.
+        contract.storage_unregister(Some(true));
+    }
+
+    #[test]
+    fn test_unregister_succeeds_after_emptying_balance() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let transfer_amount = TOTAL_SUPPLY / 10;
+        contract.ft_transfer(user1(), transfer_amount.into(), None);
+
+        // Send it back, then close the account: the documented exit path.
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.ft_transfer(owner(), transfer_amount.into(), None);
         assert!(contract.storage_unregister(Some(true)));
 
         assert!(contract.storage_balance_of(user1()).is_none());
-        assert_eq!(contract.ft_balance_of(user1()).0, 0);
-        assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY - transfer_amount);
+        assert_eq!(
+            contract.ft_total_supply().0,
+            TOTAL_SUPPLY,
+            "unregistering must not destroy tokens"
+        );
+    }
+
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
+    #[test]
+    fn test_frozen_account_cannot_burn_balance_via_unregister() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        // The freeze exists to preserve this balance for owner recovery.
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.storage_unregister(Some(true));
+    }
+
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
+    #[test]
+    fn test_paused_account_cannot_burn_balance_via_unregister() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.pause();
+
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.storage_unregister(Some(true));
     }
 
     #[test]
