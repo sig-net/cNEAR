@@ -765,7 +765,7 @@ where
 /// Detect the RPC "account does not exist" condition. The handler message is nested in the
 /// error's source chain (the top-level Display is just "unable to fulfill the query request"),
 /// so walk the chain instead of matching the top-level message.
-fn account_does_not_exist(error: &(dyn std::error::Error + 'static)) -> bool {
+pub fn account_does_not_exist(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(error);
     while let Some(err) = source {
         if err.to_string().contains("does not exist while viewing") {
@@ -900,15 +900,7 @@ async fn deploy_contracts(
     success();
     println!("{GREEN}=== Step 6: Verify Ownership ==={NC}");
     println!("{BLUE}Verifying token owner...{NC}");
-    let owner: String = signer.call(token.id(), "owner_get").view().await?.json()?;
-    if owner != controller.id().as_str() {
-        bail!(
-            "ownership verification failed: expected {}, got {}",
-            controller.id(),
-            owner
-        );
-    }
-    println!("{GREEN}✓ Ownership verified: {owner}{NC}\n");
+    verify_ownership(signer, token.id(), controller.id()).await?;
     println!("{GREEN}=== Deployment Complete ==={NC}");
     println!("Controller: {BLUE}{}{NC}", controller.id());
     println!("Token:      {BLUE}{}{NC}", token.id());
@@ -972,7 +964,7 @@ cannot be repaired.{NC}\n"
 
 /// List an account's access keys, delete the ones the operator confirms, then
 /// read the key set back so the result is verified rather than assumed.
-async fn remove_access_keys<W>(
+pub async fn remove_access_keys<W>(
     worker: &Worker<W>,
     credentials: &Path,
     account_id: &AccountId,
@@ -1113,6 +1105,30 @@ async fn register_deployment(
     Ok(())
 }
 
+/// Read the token's owner and fail unless it is `expected`.
+///
+/// TOB-CNEAR-6: the script printed a message and carried on, so a deployment
+/// whose ownership never moved still reported success and still exited zero.
+/// Both the query failing and the owner differing have to stop the deployment.
+pub async fn verify_ownership(
+    caller: &Account,
+    token_id: &AccountId,
+    expected: &AccountId,
+) -> Result<()> {
+    let owner: String = caller
+        .call(token_id, "owner_get")
+        .view()
+        .await
+        .context("could not read the token's owner")?
+        .json()
+        .context("could not parse the token's owner")?;
+    if owner != expected.as_str() {
+        bail!("ownership verification failed: expected {expected}, got {owner}");
+    }
+    println!("{GREEN}✓ Ownership verified: {owner}{NC}\n");
+    Ok(())
+}
+
 async fn deploy_and_initialize(
     actor: &Account,
     target: &AccountId,
@@ -1205,5 +1221,88 @@ mod tests {
         assert!(options.dry_run);
         assert!(!options.test_mode);
         assert!(!options.interactive);
+    }
+
+    /// TOB-CNEAR-4. The old script treated any output containing "Account" as
+    /// proof the account existed, so an RPC failure read as "it is there" and
+    /// creation was skipped. The replacement keys off one specific condition,
+    /// and everything else has to propagate.
+    #[test]
+    fn only_the_not_found_condition_counts_as_absence() {
+        #[derive(Debug)]
+        struct Err(String);
+        impl std::fmt::Display for Err {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for Err {}
+
+        let absent = Err("account alice.near does not exist while viewing".to_owned());
+        assert!(account_does_not_exist(&absent));
+
+        // The failures that matter: an unreachable endpoint, a timeout, a
+        // rejected request. None of these say anything about the account.
+        for message in [
+            "unable to fulfill the query request",
+            "error sending request for url (https://rpc.mainnet.near.org/)",
+            "operation timed out",
+            "429 Too Many Requests",
+        ] {
+            let error = Err(message.to_owned());
+            assert!(
+                !account_does_not_exist(&error),
+                "{message:?} must not be read as the account being absent"
+            );
+        }
+    }
+
+    /// The not-found condition is nested in the error's source chain rather
+    /// than in the message the top level prints, so the check has to walk it.
+    #[test]
+    fn finds_the_not_found_condition_through_a_source_chain() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "account bob.near does not exist while viewing")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "unable to fulfill the query request")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert!(account_does_not_exist(&Outer(Inner)));
+    }
+
+    /// TOB-CNEAR-3. Entering the supply in atomic units against 24 decimals is
+    /// how the original default minted a millionth of a token.
+    #[test]
+    fn whole_tokens_scale_by_the_decimals() {
+        assert_eq!(
+            tokens_to_yocto(100_000_000_000_000, 24, "supply").unwrap(),
+            100_000_000_000_000 * ONE_NEAR
+        );
+        assert_eq!(tokens_to_yocto(1, 24, "supply").unwrap(), ONE_NEAR);
+    }
+
+    #[test]
+    fn a_supply_that_cannot_be_represented_is_rejected() {
+        assert!(tokens_to_yocto(0, 24, "supply").is_err(), "zero supply");
+        assert!(
+            tokens_to_yocto(u128::MAX, 24, "supply").is_err(),
+            "overflowing supply must not wrap"
+        );
     }
 }

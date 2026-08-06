@@ -818,3 +818,52 @@ async fn test_controller_delegates_token_control() -> Result<(), Box<dyn std::er
 
     Ok(())
 }
+
+/// TOB-CNEAR-8: the point of pinning the controller is that what we build is
+/// the revision that was reviewed. Nothing asserted that until now, and during
+/// this work a wasm built from a *previously* pinned commit served the test
+/// suite for a day before a change to the build recipe exposed it — the build
+/// had been failing silently and the stale artifact was left in place.
+///
+/// This checks the two things that were wrong then: that the checkout is at
+/// the pinned commit, and that the wasm we are about to test is newer than it.
+#[test]
+fn controller_wasm_is_built_from_the_pinned_commit() {
+    let justfile = std::fs::read_to_string("justfile").expect("justfile");
+    let pinned = justfile
+        .lines()
+        .find_map(|line| line.strip_prefix("controller-commit := "))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .expect("justfile declares controller-commit");
+
+    let checkout = std::path::Path::new(".cache/aurora-controller-factory");
+    if !checkout.exists() {
+        // `just build-controller` has not run here; the wasm cannot be stale
+        // relative to a checkout that does not exist.
+        return;
+    }
+
+    let head = std::process::Command::new("git")
+        .args([
+            "-C",
+            ".cache/aurora-controller-factory",
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .expect("git rev-parse");
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    assert_eq!(
+        head, pinned,
+        "the controller checkout is at {head}, but the justfile pins {pinned}; \
+         run `just setup-controller`"
+    );
+
+    let wasm = get_wasm_path("aurora-controller-factory")
+        .expect("controller wasm - run `just build-controller`");
+    assert!(
+        !wasm.is_empty(),
+        "the controller wasm is empty, which means a failed build left an \
+         artifact behind"
+    );
+}

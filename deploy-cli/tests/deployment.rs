@@ -5,7 +5,9 @@
 //! verified ownership actually moved (TOB-CNEAR-6). The assertions afterwards
 //! state those outcomes explicitly, so a regression names what broke.
 
-use cnear_deploy::{deploy_with_signer, store_near_cli_credentials, Config, NetworkName};
+use cnear_deploy::{
+    deploy_with_signer, store_near_cli_credentials, verify_ownership, Config, NetworkName,
+};
 use near_workspaces::types::NearToken;
 use serde_json::json;
 
@@ -118,4 +120,66 @@ fn tempdir() -> anyhow::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("cnear-deploy-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// TOB-CNEAR-6: a deployment whose ownership did not move must fail, not print
+/// a message and exit zero. The successful path is covered above; this is the
+/// half that a working deployment never exercises.
+#[tokio::test]
+async fn ownership_verification_fails_when_the_owner_is_wrong() -> anyhow::Result<()> {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("deploy-cli lives in the workspace")
+        .to_path_buf();
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        std::env::set_var("CARGO_TARGET_DIR", workspace.join("target"));
+    }
+
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+    let owner = root
+        .create_subaccount("owner")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let wasm = std::fs::read(
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| workspace.join("target"))
+            .join("near/fungible_token.wasm"),
+    )?;
+    let token = worker.dev_deploy(&wasm).await?;
+    token
+        .call("new")
+        .args_json(json!({
+            "owner_id": owner.id(),
+            "total_supply": (SUPPLY_TOKENS * 10u128.pow(u32::from(DECIMALS))).to_string(),
+            "metadata": {"spec": "ft-1.0.0", "name": "cNEAR", "symbol": "cNEAR", "decimals": DECIMALS},
+            "latest_price": NearToken::from_near(1).as_yoctonear().to_string(),
+        }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    // The owner is `owner`, so verifying against anyone else must fail.
+    let someone_else = root
+        .create_subaccount("controller")
+        .initial_balance(NearToken::from_near(5))
+        .transact()
+        .await?
+        .into_result()?;
+    let result = verify_ownership(&owner, token.id(), someone_else.id()).await;
+    assert!(
+        result.is_err(),
+        "verification must fail when the token is owned by someone else"
+    );
+    assert!(format!("{:#}", result.unwrap_err()).contains("ownership verification failed"));
+
+    // And it must pass against the real owner, so the test is not just
+    // asserting that everything fails.
+    verify_ownership(&owner, token.id(), owner.id()).await?;
+    Ok(())
 }
