@@ -22,7 +22,8 @@ const DEFAULT_TOKEN_SYMBOL: &str = "cNEAR";
 /// One NEAR, and equally one whole cNEAR: both use 24 decimals.
 const ONE_NEAR: u128 = NearToken::from_near(1).as_yoctonear();
 const DEFAULT_TOKEN_DECIMALS: u8 = 24;
-const DEFAULT_TOTAL_SUPPLY: &str = "1000000000000000";
+/// The default supply cap is 100 trillion cNEAR (higher than it will ever need to be).
+const DEFAULT_TOTAL_SUPPLY_TOKENS: u128 = 100_000_000_000_000;
 /// Gas forwarded to the token when the controller delegates a call to it.
 const DELEGATED_CALL_GAS: u64 = 20_000_000_000_000;
 /// Version recorded for the initial release. Keep in sync with the token crate.
@@ -30,8 +31,9 @@ const RELEASE_VERSION: &str = "1.0.0";
 /// NEAR charges this many yoctoNEAR per byte of storage.
 /// NEAR charges 10^-5 NEAR per byte of storage.
 const STORAGE_COST_PER_BYTE: u128 = ONE_NEAR / 100_000;
-const DEFAULT_INITIAL_PRICE: &str = "1000000000000000000000000";
-const DEFAULT_INITIAL_BALANCE: &str = "10";
+/// One NEAR per cNEAR.
+const DEFAULT_INITIAL_PRICE: u128 = ONE_NEAR;
+const DEFAULT_INITIAL_BALANCE: NearToken = NearToken::from_near(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NetworkName {
@@ -57,9 +59,14 @@ struct Config {
     token_name: String,
     token_symbol: String,
     token_decimals: u8,
-    total_supply: String,
-    initial_price: String,
-    initial_balance: String,
+    /// Whole tokens, as entered by the operator.
+    total_supply_tokens: u128,
+    /// `total_supply_tokens` scaled by `token_decimals`, in yoctoNEAR; what
+    /// the token is actually initialised with.
+    total_supply_yocto: u128,
+    /// yoctoNEAR per whole cNEAR.
+    initial_price: u128,
+    initial_balance: NearToken,
     dry_run: bool,
     test_mode: bool,
 }
@@ -195,19 +202,27 @@ fn build_config(options: Options) -> Result<Config> {
             prompt_default("Token decimals", &DEFAULT_TOKEN_DECIMALS.to_string())?
                 .parse::<u8>()
                 .context("token decimals must be an integer between 0 and 255")?,
-            prompt_default("Total supply", DEFAULT_TOTAL_SUPPLY)?,
-            prompt_default(
-                "Initial price in yoctoNEAR",
-                &format!("{DEFAULT_INITIAL_PRICE} (1 NEAR)"),
-            )?
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-            prompt_default(
-                "Initial balance for new accounts in NEAR",
-                DEFAULT_INITIAL_BALANCE,
+            parse_u128(
+                &prompt_default(
+                    "Total supply (whole tokens)",
+                    &DEFAULT_TOTAL_SUPPLY_TOKENS.to_string(),
+                )?,
+                "total supply",
             )?,
+            parse_u128(
+                prompt_default(
+                    "Initial price in yoctoNEAR",
+                    &format!("{DEFAULT_INITIAL_PRICE} (1 NEAR)"),
+                )?
+                .split_whitespace()
+                .next()
+                .unwrap_or_default(),
+                "initial price",
+            )?,
+            parse_near_amount(&prompt_default(
+                "Initial balance for new accounts in NEAR",
+                &DEFAULT_INITIAL_BALANCE.exact_amount_display(),
+            )?)?,
         )
     } else {
         (
@@ -216,19 +231,14 @@ fn build_config(options: Options) -> Result<Config> {
             DEFAULT_TOKEN_NAME.to_owned(),
             DEFAULT_TOKEN_SYMBOL.to_owned(),
             DEFAULT_TOKEN_DECIMALS,
-            DEFAULT_TOTAL_SUPPLY.to_owned(),
-            DEFAULT_INITIAL_PRICE.to_owned(),
-            DEFAULT_INITIAL_BALANCE.to_owned(),
+            DEFAULT_TOTAL_SUPPLY_TOKENS,
+            DEFAULT_INITIAL_PRICE,
+            DEFAULT_INITIAL_BALANCE,
         )
     };
 
     let controller_id = parse_account_id(&values.0, "controller")?;
     let token_id = parse_account_id(&values.1, "token")?;
-    parse_u128(&values.5, "total supply")?;
-    parse_u128(&values.6, "initial price")?;
-    parse_near_amount(&values.7)
-        .with_context(|| format!("invalid initial balance in NEAR: {}", values.7))?;
-
     if options.test_mode {
         println!("{BLUE}Test mode: Using default configuration{NC}");
     }
@@ -240,7 +250,8 @@ fn build_config(options: Options) -> Result<Config> {
         token_name: values.2,
         token_symbol: values.3,
         token_decimals: values.4,
-        total_supply: values.5,
+        total_supply_yocto: tokens_to_yocto(values.5, values.4, "total supply")?,
+        total_supply_tokens: values.5,
         initial_price: values.6,
         initial_balance: values.7,
         dry_run: options.dry_run,
@@ -350,6 +361,20 @@ fn parse_account_id(value: &str, label: &str) -> Result<AccountId> {
         .with_context(|| format!("invalid {label} account ID: {value}"))
 }
 
+/// Convert a whole-token amount into yoctoNEAR, rejecting anything that cannot
+/// be represented rather than silently wrapping.
+pub fn tokens_to_yocto(tokens: u128, decimals: u8, label: &str) -> Result<u128> {
+    if tokens == 0 {
+        bail!("{label} must be greater than zero");
+    }
+    let multiplier = 10u128
+        .checked_pow(u32::from(decimals))
+        .ok_or_else(|| anyhow!("{decimals} decimals is too many to represent"))?;
+    tokens.checked_mul(multiplier).ok_or_else(|| {
+        anyhow!("{label} of {tokens} tokens at {decimals} decimals overflows a u128")
+    })
+}
+
 fn parse_u128(value: &str, label: &str) -> Result<u128> {
     value
         .parse()
@@ -421,8 +446,15 @@ fn print_configuration(config: &Config) {
     println!("Token Name:        {}", config.token_name);
     println!("Token Symbol:      {}", config.token_symbol);
     println!("Token Decimals:    {}", config.token_decimals);
-    println!("Total Supply:      {}", config.total_supply);
-    println!("Initial Price:     {}", config.initial_price);
+    println!(
+        "Total Supply:      {} tokens ({} yoctoNEAR at {} decimals)",
+        config.total_supply_tokens, config.total_supply_yocto, config.token_decimals
+    );
+    println!(
+        "Initial Price:     {} yoctoNEAR ({} per cNEAR)",
+        config.initial_price,
+        NearToken::from_yoctonear(config.initial_price).exact_amount_display()
+    );
     println!("Dry Run:           {}", config.dry_run);
     println!();
 }
@@ -560,7 +592,7 @@ fn print_command(command: &str) {
 }
 
 fn token_init_args(config: &Config) -> serde_json::Value {
-    json!({"owner_id": config.signer_id, "total_supply": config.total_supply, "metadata": {"spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals}, "latest_price": config.initial_price})
+    json!({"owner_id": config.signer_id, "total_supply": config.total_supply_yocto.to_string(), "metadata": {"spec": "ft-1.0.0", "name": config.token_name, "symbol": config.token_symbol, "decimals": config.token_decimals}, "latest_price": config.initial_price.to_string()})
 }
 
 async fn deploy(config: Config) -> Result<()> {
@@ -593,11 +625,11 @@ where
             println!("{GREEN}=== Test Mode: Creating Subaccounts ==={NC}");
             println!("\n{BLUE}Creating controller account...{NC}");
             let controller =
-                create_account(&signer, &config.controller_id, &config.initial_balance).await?;
+                create_account(&signer, &config.controller_id, config.initial_balance).await?;
             created_controller = Some(controller.clone());
             success();
             println!("\n{BLUE}Creating token account...{NC}");
-            let token = create_account(&signer, &config.token_id, &config.initial_balance).await?;
+            let token = create_account(&signer, &config.token_id, config.initial_balance).await?;
             created_token = Some(token.clone());
             success();
             Ok((controller, token))
@@ -608,7 +640,7 @@ where
                 &signer,
                 &credentials,
                 &config.controller_id,
-                &config.initial_balance,
+                config.initial_balance,
                 &mut created_controller,
             )
             .await?;
@@ -617,7 +649,7 @@ where
                 &signer,
                 &credentials,
                 &config.token_id,
-                &config.initial_balance,
+                config.initial_balance,
                 &mut created_token,
             )
             .await?;
@@ -668,7 +700,7 @@ async fn target_account<W>(
     signer: &Account,
     credentials: &Path,
     id: &AccountId,
-    balance: &str,
+    balance: NearToken,
     created: &mut Option<Account>,
 ) -> Result<Account>
 where
@@ -751,7 +783,7 @@ fn store_near_cli_credentials(account: &Account, dir: &Path) -> Result<()> {
 async fn create_account(
     signer: &Account,
     target_id: &AccountId,
-    initial_balance: &str,
+    initial_balance: NearToken,
 ) -> Result<Account> {
     let suffix = target_id
         .as_str()
@@ -767,7 +799,7 @@ async fn create_account(
     let account = signer
         .create_subaccount(suffix)
         .keys(SecretKey::from_random(KeyType::ED25519))
-        .initial_balance(parse_near_amount(initial_balance)?)
+        .initial_balance(initial_balance)
         .transact()
         .await?
         .into_result()
