@@ -85,8 +85,9 @@ clean:
 
 # Check code
 check:
-    cargo check
-    cargo clippy -- -D warnings
+    cargo check --workspace --all-targets
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all -- --check
 
 # Format code
 fmt:

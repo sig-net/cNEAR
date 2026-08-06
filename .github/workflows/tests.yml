@@ -17,5 +17,12 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
       - name: Build contracts
         run: just build
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      # Each sandbox test starts its own neard. Running them all at once races
+      # on unpacking the shared near-sandbox binary and on binding ports, which
+      # looks like a flaky test but is contention. Two at a time is stable.
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace --locked -- --test-threads=2
