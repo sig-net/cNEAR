@@ -36,7 +36,7 @@ const DEFAULT_INITIAL_PRICE: u128 = ONE_NEAR;
 const DEFAULT_INITIAL_BALANCE: NearToken = NearToken::from_near(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NetworkName {
+pub enum NetworkName {
     Testnet,
     Mainnet,
 }
@@ -51,28 +51,28 @@ impl NetworkName {
 }
 
 #[derive(Clone, Debug)]
-struct Config {
-    network: NetworkName,
-    signer_id: AccountId,
-    controller_id: AccountId,
-    token_id: AccountId,
-    token_name: String,
-    token_symbol: String,
-    token_decimals: u8,
+pub struct Config {
+    pub network: NetworkName,
+    pub signer_id: AccountId,
+    pub controller_id: AccountId,
+    pub token_id: AccountId,
+    pub token_name: String,
+    pub token_symbol: String,
+    pub token_decimals: u8,
     /// Whole tokens, as entered by the operator.
-    total_supply_tokens: u128,
+    pub total_supply_tokens: u128,
     /// `total_supply_tokens` scaled by `token_decimals`, in yoctoNEAR; what
     /// the token is actually initialised with.
-    total_supply_yocto: u128,
+    pub total_supply_yocto: u128,
     /// yoctoNEAR per whole cNEAR.
-    initial_price: u128,
-    initial_balance: NearToken,
-    dry_run: bool,
-    test_mode: bool,
+    pub initial_price: u128,
+    pub initial_balance: NearToken,
+    pub dry_run: bool,
+    pub test_mode: bool,
 }
 
 #[derive(Debug)]
-struct Options {
+pub struct Options {
     network: Option<NetworkName>,
     signer_id: Option<String>,
     dry_run: bool,
@@ -170,7 +170,7 @@ fn parse_options(args: &[String]) -> Result<Options> {
     })
 }
 
-fn build_config(options: Options) -> Result<Config> {
+pub fn build_config(options: Options) -> Result<Config> {
     let network = match options.network {
         Some(network) => network,
         None if options.test_mode => NetworkName::Testnet,
@@ -270,7 +270,7 @@ fn build_config(options: Options) -> Result<Config> {
     })
 }
 
-fn credentials_dir(network: NetworkName) -> Result<PathBuf> {
+pub fn credentials_dir(network: NetworkName) -> Result<PathBuf> {
     let base = env::var_os("NEAR_CREDENTIALS")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".near-credentials")))
@@ -628,7 +628,17 @@ where
             config.signer_id
         );
     }
+    deploy_with_signer(worker, signer, config).await
+}
 
+/// The deployment itself, once a signer is in hand. Separated from
+/// [`deploy_on_worker`] so tests can drive it against a sandbox without
+/// needing credential files on disk.
+pub async fn deploy_with_signer<W>(worker: Worker<W>, signer: Account, config: Config) -> Result<()>
+where
+    W: Network + 'static,
+{
+    let credentials = credentials_dir(config.network)?;
     let mut created_controller = None;
     let mut created_token = None;
     let setup: Result<(Account, Account)> = async {
@@ -770,7 +780,7 @@ fn account_does_not_exist(error: &(dyn std::error::Error + 'static)) -> bool {
 /// (`private_key`). near-workspaces' own `store_credentials` writes `secret_key`, which
 /// near-cli-rs (e.g. 0.29) cannot parse; near-crypto's `InMemorySigner::from_file` accepts
 /// `private_key` via a serde alias, so this single format works for both tools.
-fn store_near_cli_credentials(account: &Account, dir: &Path) -> Result<()> {
+pub fn store_near_cli_credentials(account: &Account, dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join(format!("{}.json", account.id()));
     let secret_key = account.secret_key();

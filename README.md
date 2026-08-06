@@ -112,7 +112,7 @@ The deployment is implemented in Rust (`deploy-cli/`) and talks to the network t
 - Freeze/unfreeze accounts via `delegate_execution`
 - Upgrade token via release management (`add_release_info`, `add_release_blob`, `upgrade`)
 
-**We reccomend that the token account is funded with at least 60 NEAR.** The contract code itself locks ~3.4 NEAR of storage, and the freeze list is funded from the contract's own balance rather than by callers. Each 1 NEAR gives you to have ~900 frozen accounts, allowing you to freeze 5,000 accounts before you have to top up.
+**We reccomend that the token account is funded with at least 60 NEAR, and the controller account with at least 20 NEAR.** The controller stores its own code (~4.1 NEAR) and a copy of each token release blob it is given (~3.4 NEAR per release), so it needs headroom of its own. The contract code itself locks ~3.4 NEAR of storage, and the freeze list is funded from the contract's own balance rather than by callers. Each 1 NEAR gives you to have ~900 frozen accounts, allowing you to freeze 5,000 accounts before you have to top up.
 
 Once you are happy with a deployment, and have manually tested all the functionality, you must remove the access keys by running:
 
