@@ -83,15 +83,7 @@ This tests the deployment flow without leaving accounts on testnet.
 For permanent deployment to mainnet:
 
 ```bash
-# Deploy (automatically builds contracts first)
-# Interactive mode - prompts for all configuration
-just deploy
-
-# Or specify network and signer
 just deploy mainnet your-account.near
-
-# Preview commands without executing
-just deploy mainnet your-account.near --dry-run
 ```
 
 **Interactive mode prompts:**
@@ -113,13 +105,7 @@ just deploy mainnet your-account.near --dry-run
 6. Has the controller accept ownership (via `delegate_execution`)
 7. Verifies ownership through a view call
 
-The deployment is implemented in Rust (`deploy-cli/`) and talks to the network
-through typed RPC calls rather than parsing the output of the `near` CLI.
-`scripts/deploy.sh` remains as a thin wrapper for anyone with it in muscle
-memory. Credentials come from `NEAR_CREDENTIALS/<network>/` (or
-`~/.near-credentials/<network>/`); a credential file is only used after checking
-that the account ID inside it matches the account being deployed to, and any
-accounts created during a run that later fails are cleaned up.
+The deployment is implemented in Rust (`deploy-cli/`) and talks to the network through typed RPC calls rather than parsing the output of the `near` CLI. `scripts/deploy.sh` remains as a thin wrapper for anyone with it in muscle memory. Credentials come from `NEAR_CREDENTIALS/<network>/` (or `~/.near-credentials/<network>/`).
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`
@@ -128,33 +114,13 @@ accounts created during a run that later fails are cleaned up.
 
 **We reccomend that the token account is funded with at least 60 NEAR.** The contract code itself locks ~3.4 NEAR of storage, and the freeze list is funded from the contract's own balance rather than by callers. Each 1 NEAR gives you to have ~900 frozen accounts, allowing you to freeze 5,000 accounts before you have to top up.
 
-Once you are happy with a deployment, and have manually tested all the functionality, remove all access keys from the cNEAR contract **AND** the controller contract:
+Once you are happy with a deployment, and have manually tested all the functionality, you must remove the access keys by running:
 
 ```bash
-# List the keys currently on the token account
-near list-keys <contract-id> --networkId mainnet
-
-# Delete each full access key listed above
-near delete-key <contract-id> <public-key> --accountId <token-account-id> --networkId mainnet
-
-# Verify the account is keyless
-near list-keys <contract-id> --networkId mainnet
+cargo run -p cnear-deploy -- finalize mainnet <signer-account-id>
 ```
 
-## How to Deploy Manually?
-
-To deploy manually, install [`cargo-near`](https://github.com/near/cargo-near) and run:
-
-```bash
-# Create a new account
-cargo near create-account <contract-account-id> --useFaucet
-
-# Deploy the contract on it
-cargo near deploy <contract-account-id>
-
-# Initialize the contract (latest_price is in yoctoNEAR, ONE_NEAR = 10^24)
-near call <contract-account-id> new '{"owner_id": "<contract-account-id>", "total_supply": "1000000000000000", "metadata": { "spec": "ft-1.0.0", "name": "Example Token Name", "symbol": "EXLT", "decimals": 8 }, "latest_price": "1000000000000000000000000"}' --accountId <contract-account-id>
-```
+A keyless contract whose upgrade path does not work cannot be repaired by anyone, so only run this after the release, pause, freeze and upgrade checks have all passed. 
 
 ## Basic methods
 ```bash

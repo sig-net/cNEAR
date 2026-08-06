@@ -82,12 +82,16 @@ struct Options {
 
 pub fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("deploy") {
-        print_help();
-        if args.is_empty() {
-            return Ok(());
+    match args.first().map(String::as_str) {
+        Some("deploy") => {}
+        Some("finalize") => return finalize_command(&args[1..]),
+        _ => {
+            print_help();
+            if args.is_empty() {
+                return Ok(());
+            }
+            bail!("expected the 'deploy' or 'finalize' command");
         }
-        bail!("expected the 'deploy' command");
     }
 
     let config = build_config(parse_options(&args[1..])?)?;
@@ -106,7 +110,13 @@ pub fn run() -> Result<()> {
 }
 
 fn print_help() {
-    println!("Usage: deploy deploy [testnet|mainnet] [signer_id] [--dry-run] [--test-mode]");
+    println!(
+        "Usage: deploy <deploy|finalize> [testnet|mainnet] [signer_id] [--dry-run] [--test-mode]"
+    );
+    println!();
+    println!("Commands:");
+    println!("  deploy             Deploy the controller and token, and register the deployment");
+    println!("  finalize           Remove access keys once the functional checks have passed");
     println!();
     println!("Options:");
     println!("  testnet|mainnet    Target network (default: testnet)");
@@ -119,6 +129,7 @@ fn print_help() {
     println!("  deploy deploy testnet                      # Interactive signer selection");
     println!("  deploy deploy testnet alice.testnet        # Full CLI mode");
     println!("  deploy deploy mainnet bob.near --dry-run   # Dry run");
+    println!("  deploy finalize mainnet bob.near           # Remove access keys");
     println!();
     println!("Via justfile:");
     println!("  just deploy test                           # Quick testnet deployment");
@@ -902,6 +913,119 @@ async fn deploy_contracts(
 /// this every controller-mediated upgrade is rejected (TOB-CNEAR-5). Registering
 /// the release itself as well means the currently deployed code is known to the
 /// controller, which is what makes a downgrade back to it possible.
+/// Remove the access keys that let a key holder bypass the contract's own
+/// authorization (TOB-CNEAR-2).
+///
+/// This is deliberately a separate command rather than part of `deploy`: it must
+/// run *after* the release, pause, freeze and upgrade checks, because a keyless
+/// contract whose upgrade path does not work cannot be repaired by anyone.
+fn finalize_command(args: &[String]) -> Result<()> {
+    let options = parse_options(args)?;
+    let config = build_config(options)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create async runtime")?;
+    runtime.block_on(finalize(config))
+}
+
+async fn finalize(config: Config) -> Result<()> {
+    match config.network {
+        NetworkName::Testnet => finalize_on_worker(near_workspaces::testnet().await?, config).await,
+        NetworkName::Mainnet => finalize_on_worker(near_workspaces::mainnet().await?, config).await,
+    }
+}
+
+async fn finalize_on_worker<W>(worker: Worker<W>, config: Config) -> Result<()>
+where
+    W: Network + 'static,
+{
+    let credentials = credentials_dir(config.network)?;
+
+    println!("{YELLOW}Removing every access key from the token account, and any");
+    println!("key you do not confirm as required from the controller account.{NC}");
+    println!(
+        "{RED}Only do this once you have verified that upgrades through the \
+controller work. Without a key, a contract whose upgrade path is broken \
+cannot be repaired.{NC}\n"
+    );
+    if !prompt_yes_no("Have the release, pause, freeze and upgrade checks all passed?")? {
+        bail!("finalization aborted: run the functional checks first");
+    }
+
+    remove_access_keys(&worker, &credentials, &config.token_id, true).await?;
+    remove_access_keys(&worker, &credentials, &config.controller_id, false).await?;
+
+    println!("{GREEN}=== Finalization Complete ==={NC}");
+    Ok(())
+}
+
+/// List an account's access keys, delete the ones the operator confirms, then
+/// read the key set back so the result is verified rather than assumed.
+async fn remove_access_keys<W>(
+    worker: &Worker<W>,
+    credentials: &Path,
+    account_id: &AccountId,
+    remove_all: bool,
+) -> Result<()>
+where
+    W: Network + 'static,
+{
+    println!("{GREEN}=== Access keys on {account_id} ==={NC}");
+    let keys = worker
+        .view_access_keys(account_id)
+        .await
+        .with_context(|| format!("failed to list access keys on {account_id}"))?;
+    if keys.is_empty() {
+        println!("{GREEN}✓ {account_id} already has no access keys{NC}\n");
+        return Ok(());
+    }
+    for key in &keys {
+        println!("  {}", key.public_key);
+    }
+
+    let path = credentials.join(format!("{account_id}.json"));
+    let account = Account::from_file(&path, worker)
+        .with_context(|| format!("need credentials for {account_id} at {}", path.display()))?;
+
+    for key in &keys {
+        let remove = remove_all
+            || prompt_yes_no(&format!(
+                "Remove {} from {account_id}? (keep it only if your governance model requires it)",
+                key.public_key
+            ))?;
+        if !remove {
+            println!("{YELLOW}  keeping {}{NC}", key.public_key);
+            continue;
+        }
+        account
+            .batch(account_id)
+            .delete_key(key.public_key.clone())
+            .transact()
+            .await?
+            .into_result()
+            .with_context(|| format!("failed to delete {} from {account_id}", key.public_key))?;
+        println!("{GREEN}  removed {}{NC}", key.public_key);
+    }
+
+    let remaining = worker
+        .view_access_keys(account_id)
+        .await
+        .with_context(|| format!("failed to re-read access keys on {account_id}"))?;
+    if remove_all && !remaining.is_empty() {
+        bail!(
+            "{} still has {} access key(s) after finalization",
+            account_id,
+            remaining.len()
+        );
+    }
+    println!(
+        "{GREEN}✓ {account_id} now has {} access key(s){NC}\n",
+        remaining.len()
+    );
+    Ok(())
+}
+
 async fn register_deployment(
     signer: &Account,
     controller: &Account,
