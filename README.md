@@ -212,6 +212,9 @@ near call <controller-id> add_release_info '{"hash": "<wasm-sha256>", "version":
 # 2. Upload wasm blob
 near call <controller-id> add_release_blob --accountId <dao-account> --amount 0.000000000000000000000001 < token.wasm
 
+# 3. Register the deployment, if the controller did not deploy the token itself.
+# Without this record the controller rejects every upgrade.
+near call <controller-id> add_deployment_info '{"contract_id": "<token-id>", "deployment_info": {"hash": "<wasm-sha256>", "version": "1.0.0", "deployment_time": 0, "upgrade_times": {}, "init_args": ""}}' --accountId <dao-account> --amount 0.000000000000000000000001
 
 # 4. Upgrade token
 near call <controller-id> upgrade '{"contract_id": "<token-id>", "hash": "<wasm-sha256>"}' --accountId <dao-account> --amount 0.000000000000000000000001
