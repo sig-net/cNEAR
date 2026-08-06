@@ -3,6 +3,7 @@ use near_workspaces::operations::Function;
 use near_workspaces::types::{AccountId, KeyType, NearToken, SecretKey};
 use near_workspaces::{Account, Network, Worker};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -24,6 +25,11 @@ const DEFAULT_TOKEN_DECIMALS: u8 = 24;
 const DEFAULT_TOTAL_SUPPLY: &str = "1000000000000000";
 /// Gas forwarded to the token when the controller delegates a call to it.
 const DELEGATED_CALL_GAS: u64 = 20_000_000_000_000;
+/// Version recorded for the initial release. Keep in sync with the token crate.
+const RELEASE_VERSION: &str = "1.0.0";
+/// NEAR charges this many yoctoNEAR per byte of storage.
+/// NEAR charges 10^-5 NEAR per byte of storage.
+const STORAGE_COST_PER_BYTE: u128 = ONE_NEAR / 100_000;
 const DEFAULT_INITIAL_PRICE: &str = "1000000000000000000000000";
 const DEFAULT_INITIAL_BALANCE: &str = "10";
 
@@ -476,7 +482,44 @@ fn print_dry_run(config: &Config) {
         config.signer_id,
         config.network.as_str()
     ));
-    println!("{GREEN}=== Step 5: Verify Ownership ==={NC}");
+    println!("{GREEN}=== Step 5: Register Token Deployment with Controller ==={NC}");
+    print_command(&format!(
+        "near call {} add_release_info '{{\"hash\":\"<token-wasm-sha256>\",\"version\":\"{}\",\"is_latest\":true}}' --accountId {} --networkId {} --amount 0.000000000000000000000001",
+        config.controller_id,
+        RELEASE_VERSION,
+        config.signer_id,
+        config.network.as_str()
+    ));
+    // The blob is stored in the controller's state, so this call carries a
+    // deposit sized to it. Showing it matters: this preview is the only
+    // rehearsal a mainnet deployment gets.
+    let blob_deposit = fs::metadata(token_wasm())
+        .map(|meta| {
+            NearToken::from_yoctonear(meta.len() as u128 * STORAGE_COST_PER_BYTE + ONE_NEAR)
+        })
+        .unwrap_or_else(|_| NearToken::from_near(0));
+    print_command(&format!(
+        "near call {} add_release_blob --accountId {} --networkId {} --amount {} < {}",
+        config.controller_id,
+        config.signer_id,
+        config.network.as_str(),
+        near_amount_arg(blob_deposit),
+        token_wasm().display()
+    ));
+    print_command(&format!(
+        "near call {} add_deployment_info '{{\"contract_id\":\"{}\",...}}' --accountId {} --networkId {} --amount 0.000000000000000000000001",
+        config.controller_id,
+        config.token_id,
+        config.signer_id,
+        config.network.as_str()
+    ));
+    print_command(&format!(
+        "near view {} get_deployment '{{\"account_id\":\"{}\"}}' --networkId {}",
+        config.controller_id,
+        config.token_id,
+        config.network.as_str()
+    ));
+    println!("{GREEN}=== Step 6: Verify Ownership ==={NC}");
     print_command(&format!(
         "near view {} owner_get '{{}}' --networkId {}",
         config.token_id,
@@ -799,7 +842,10 @@ async fn deploy_contracts(
         .into_result()
         .context("controller failed to accept token ownership")?;
     success();
-    println!("{GREEN}=== Step 5: Verify Ownership ==={NC}");
+    println!("{GREEN}=== Step 5: Register Token Deployment with Controller ==={NC}");
+    register_deployment(signer, controller, token).await?;
+    success();
+    println!("{GREEN}=== Step 6: Verify Ownership ==={NC}");
     println!("{BLUE}Verifying token owner...{NC}");
     let owner: String = signer.call(token.id(), "owner_get").view().await?.json()?;
     if owner != controller.id().as_str() {
@@ -814,6 +860,90 @@ async fn deploy_contracts(
     println!("Controller: {BLUE}{}{NC}", controller.id());
     println!("Token:      {BLUE}{}{NC}", token.id());
     println!("Owner:      {BLUE}{}{NC}", controller.id());
+    Ok(())
+}
+
+/// Register the token with the controller's deployment registry.
+///
+/// The controller looks up a deployment record before it will build an upgrade
+/// promise, and panics with "hasn't been deployed" when none exists, so without
+/// this every controller-mediated upgrade is rejected (TOB-CNEAR-5). Registering
+/// the release itself as well means the currently deployed code is known to the
+/// controller, which is what makes a downgrade back to it possible.
+async fn register_deployment(
+    signer: &Account,
+    controller: &Account,
+    token: &Account,
+) -> Result<()> {
+    let wasm = fs::read(token_wasm())?;
+    let hash = format!("{:x}", Sha256::digest(&wasm));
+
+    signer
+        .call(controller.id(), "add_release_info")
+        .args_json(json!({
+            "hash": &hash,
+            "version": RELEASE_VERSION,
+            "is_latest": true,
+            "downgrade_hash": null,
+            "description": "cNEAR",
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()
+        .context("registering the release with the controller failed")?;
+
+    // The blob is stored in the controller's state, so the deposit has to cover
+    // its storage staking.
+    let blob_deposit =
+        NearToken::from_yoctonear(wasm.len() as u128 * STORAGE_COST_PER_BYTE + ONE_NEAR);
+    signer
+        .call(controller.id(), "add_release_blob")
+        .args(wasm)
+        .deposit(blob_deposit)
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()
+        .context("uploading the release blob to the controller failed")?;
+
+    signer
+        .call(controller.id(), "add_deployment_info")
+        .args_json(json!({
+            "contract_id": token.id(),
+            "deployment_info": {
+                "hash": &hash,
+                "version": RELEASE_VERSION,
+                "deployment_time": 0u64,
+                "upgrade_times": {},
+                "init_args": "",
+            },
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()
+        .context("registering the deployment with the controller failed")?;
+
+    // Reporting success without checking the registry is how TOB-CNEAR-5 stayed
+    // invisible, so read the record back and check it describes this token.
+    let deployment: serde_json::Value = signer
+        .call(controller.id(), "get_deployment")
+        .args_json(json!({ "account_id": token.id() }))
+        .view()
+        .await?
+        .json()?;
+    let recorded_hash = deployment.get("hash").and_then(|h| h.as_str());
+    if recorded_hash != Some(hash.as_str()) {
+        bail!(
+            "deployment registration failed: controller recorded hash {:?}, expected {}",
+            recorded_hash,
+            hash
+        );
+    }
+    println!("{GREEN}✓ Deployment registered: {hash}{NC}");
     Ok(())
 }
 
