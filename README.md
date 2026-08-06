@@ -212,8 +212,13 @@ near call <controller-id> add_release_info '{"hash": "<wasm-sha256>", "version":
 # 2. Upload wasm blob
 near call <controller-id> add_release_blob --accountId <dao-account> --amount 0.000000000000000000000001 < token.wasm
 
-# 3. Upgrade token
+
+# 4. Upgrade token
 near call <controller-id> upgrade '{"contract_id": "<token-id>", "hash": "<wasm-sha256>"}' --accountId <dao-account> --amount 0.000000000000000000000001
+
+# 5. Verify the upgraded contract actually runs. A successful controller
+# transaction does NOT prove the token contains executable code.
+near view <token-id> owner_get
 ```
 
 ## Notes

@@ -174,10 +174,29 @@ impl Contract {
         self.paused
     }
 
-    /// Upgrade contract code - owner only
+    /// Upgrade contract code - owner only.
+    ///
+    /// The arguments are Borsh-encoded, matching the interface the Aurora
+    /// controller calls (`code`, `state_migration_gas`).
     #[access_control_any(roles(Role::Owner))]
-    pub fn upgrade(&self) -> Promise {
-        let code = env::input().expect("no code provided").to_vec();
+    pub fn upgrade(
+        &self,
+        #[serializer(borsh)] code: Vec<u8>,
+        #[serializer(borsh)] state_migration_gas: Option<u64>,
+    ) -> Promise {
+        // The controller attaches 1 yoctoNEAR; requiring it keeps function-call
+        // access keys (which cannot attach a deposit) away from this method.
+        assert_one_yocto();
+        require!(
+            state_migration_gas.is_none(),
+            "state migration is not supported: state_migration_gas must be null"
+        );
+        // Reject anything that is not a WASM module, so a malformed upgrade
+        // fails here instead of installing code the runtime cannot compile.
+        require!(
+            code.starts_with(b"\0asm"),
+            "code is not a WASM module (expected the \\0asm magic bytes)"
+        );
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
