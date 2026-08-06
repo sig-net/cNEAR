@@ -4,14 +4,13 @@ set dotenv-load := true
 # This is *NOT* the audited commit on the reccomendation of the Aurora team
 controller-commit := "351dc02743894ca297e7a6f37aace470098c9630"
 
-# Setup aurora-controller at the pinned commit
+# Cache the controller source outside target, at the pinned commit.
 setup-controller:
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
-    DIR="$TARGET_DIR/contracts/aurora-controller-factory"
+    DIR=".cache/aurora-controller-factory"
     if [ ! -d "$DIR/.git" ]; then
-        mkdir -p "$TARGET_DIR/contracts"
+        mkdir -p .cache
         git clone https://github.com/aurora-is-near/aurora-controller-factory.git "$DIR"
     fi
     if ! git -C "$DIR" diff --quiet || ! git -C "$DIR" diff --cached --quiet; then
@@ -25,12 +24,26 @@ setup-controller:
 # Build aurora-controller using cargo make (puts wasm in res/)
 build-controller: setup-controller
     #!/usr/bin/env bash
-    cd contracts/aurora-controller-factory
-    cargo make build
-    # Copy wasms back to repo root's target/near dir
-    cd ../..
-    mkdir -p target/near
-    cp contracts/aurora-controller-factory/res/aurora-controller-factory.wasm target/near/ 2>/dev/null || true
+    set -euo pipefail
+    ROOT_DIR="$PWD"
+    TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+    case "$TARGET_DIR" in
+        /*) ;;
+        *) TARGET_DIR="$ROOT_DIR/$TARGET_DIR" ;;
+    esac
+    export CARGO_TARGET_DIR="$TARGET_DIR"
+    cd .cache/aurora-controller-factory
+    # The controller pins its own (older) toolchain and its near-sdk refuses
+    # newer compilers. With rustup, the rust-toolchain file in this directory
+    # is honoured automatically; under nix we ask for the matching devshell.
+    if command -v rustup >/dev/null 2>&1; then
+        cargo make build
+    else
+        nix develop "$ROOT_DIR#controller" --command cargo make build
+    fi
+    cd "$ROOT_DIR"
+    mkdir -p "$TARGET_DIR/near"
+    cp .cache/aurora-controller-factory/res/aurora-controller-factory.wasm "$TARGET_DIR/near/"
 
 # Build token contract with wasm-opt
 build-token:
@@ -56,12 +69,18 @@ release: build
 # Clean build artifacts
 clean:
     #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT_DIR="$PWD"
+    TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+    case "$TARGET_DIR" in
+        /*) ;;
+        *) TARGET_DIR="$ROOT_DIR/$TARGET_DIR" ;;
+    esac
     cargo clean
-    TARGET_DIR="${CARGO_TARGET_DIR:-.}"
-    rm -rf target/near/
-    if [ -d "$TARGET_DIR/contracts/aurora-controller-factory" ]; then
-        cd "$TARGET_DIR/contracts/aurora-controller-factory"
-        cargo make clean
+    rm -rf "$TARGET_DIR/near/"
+    if [ -d .cache/aurora-controller-factory ]; then
+        cd .cache/aurora-controller-factory
+        CARGO_TARGET_DIR="$TARGET_DIR" cargo make clean
     fi
 
 # Check code
@@ -80,30 +99,31 @@ all: check build test
 # Usage: just deploy [testnet|mainnet|test] [signer_id] [--dry-run]
 deploy *ARGS:
     #!/usr/bin/env bash
-    set -e
-    
-    # Build contracts with suppressed output (show only on error)
+    set -euo pipefail
+    ARGS_STR="{{ARGS}}"
+
+    # Dry runs are deliberately offline and do not build or contact a network.
+    if [[ "$ARGS_STR" == *"--dry-run"* ]]; then
+        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
+        exit $?
+    fi
+
     echo "Building contracts..."
-    BUILD_OUTPUT=$(just build 2>&1)
-    BUILD_EXIT=$?
-    
-    if [ $BUILD_EXIT -ne 0 ]; then
+    BUILD_OUTPUT=$(just build 2>&1) || {
         echo "$BUILD_OUTPUT"
         echo "Build failed. Aborting deployment."
-        exit $BUILD_EXIT
-    fi
+        exit 1
+    }
     echo "✓ Build complete"
     echo ""
-    
-    # Run deployment
-    ARGS_STR="{{ARGS}}"
+
     if [[ "$ARGS_STR" == "test" || "$ARGS_STR" == "test "* ]]; then
-        # Test mode: auto-select testnet, only prompt for signer
+        # Test mode: auto-select testnet, only prompt for signer.
         REMAINING_ARGS="${ARGS_STR#test}"
         REMAINING_ARGS="${REMAINING_ARGS# }"
-        ./scripts/deploy.sh testnet $REMAINING_ARGS --test-mode
+        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy testnet $REMAINING_ARGS --test-mode
     else
-        ./scripts/deploy.sh {{ARGS}}
+        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
     fi
 
 # Help

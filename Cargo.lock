@@ -530,6 +530,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cnear-deploy"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "near-workspaces",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

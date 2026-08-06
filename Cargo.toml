@@ -1,3 +1,6 @@
+[workspace]
+members = ["deploy-cli"]
+
 [package]
 name = "fungible-token"
 version = "1.0.0"

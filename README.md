@@ -107,11 +107,19 @@ just deploy mainnet your-account.near --dry-run
 **Production deployment flow:**
 1. Checks if controller account exists, creates if needed
 2. Checks if token account exists, creates if needed
-3. Deploys controller contract
-4. Deploys token contract with signer as initial owner
+3. Deploys and initialises the controller contract in one transaction
+4. Deploys and initialises the token contract with the signer as initial owner
 5. Proposes the controller as the token's new owner
 6. Has the controller accept ownership (via `delegate_execution`)
-7. Verifies ownership
+7. Verifies ownership through a view call
+
+The deployment is implemented in Rust (`deploy-cli/`) and talks to the network
+through typed RPC calls rather than parsing the output of the `near` CLI.
+`scripts/deploy.sh` remains as a thin wrapper for anyone with it in muscle
+memory. Credentials come from `NEAR_CREDENTIALS/<network>/` (or
+`~/.near-credentials/<network>/`); a credential file is only used after checking
+that the account ID inside it matches the account being deployed to, and any
+accounts created during a run that later fails are cleaned up.
 
 **After deployment, the controller owns the token and can:**
 - Pause/unpause via `delegate_pause`
