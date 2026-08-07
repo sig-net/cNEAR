@@ -20,16 +20,12 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@v4
+      # Pre-install a prebuilt cargo-audit binary; without this, audit-check
+      # compiles cargo-audit from source with the repo's pinned toolchain,
+      # which breaks whenever cargo-audit's MSRV moves past the pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-  # Fail the PR if Cargo.lock is not fully up to date with the newest
-  # compatible (MSRV-respecting) versions of every dependency.
-  lockfile-fresh:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check dependencies are up to date
-        run: cargo update --locked

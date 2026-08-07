@@ -1252,7 +1252,8 @@ mod tests {
             let error = Err(message.to_owned());
             assert!(
                 !account_does_not_exist(&error),
-                "{message:?} must not be read as the account being absent"
+                "{:?} must not be read as the account being absent",
+                message
             );
         }
     }
