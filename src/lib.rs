@@ -93,6 +93,11 @@ pub enum ContractEvent {
         new_owner: AccountId,
     },
     #[event_version("1.0.0")]
+    OwnershipTransferCancelled {
+        by: AccountId,
+        pending_owner: Option<AccountId>,
+    },
+    #[event_version("1.0.0")]
     OwnerChanged {
         old_owner: AccountId,
         new_owner: AccountId,
@@ -316,9 +321,17 @@ impl Contract {
     }
 
     /// Cancel a pending ownership transfer.
+    ///
+    /// Emits an `OwnershipTransferCancelled` event on every successful call,
+    /// even if no transfer was pending.
     #[only(owner)]
     pub fn owner_cancel_transfer(&mut self) {
-        self.pending_owner = None;
+        let pending_owner = self.pending_owner.take();
+        ContractEvent::OwnershipTransferCancelled {
+            by: self.owner_id.clone(),
+            pending_owner,
+        }
+        .emit();
     }
 
     /// Move ownership and clear any pending transfer. The new owner replaces
@@ -1736,6 +1749,27 @@ mod tests {
 
         assert_eq!(contract.pending_owner_get(), None);
         assert_eq!(contract.owner_get(), owner());
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 2);
+        assert!(events[1].contains("\"event\":\"ownership_transfer_cancelled\""));
+        assert!(events[1].contains(&format!("\"by\":\"{}\"", owner())));
+        assert!(events[1].contains(&format!("\"pending_owner\":\"{}\"", user1())));
+    }
+
+    // Privileged actions are audited unconditionally: cancelling when no
+    // transfer is pending still emits the event.
+    #[test]
+    fn test_cancel_without_pending_transfer_emits_event() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_cancel_transfer();
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"ownership_transfer_cancelled\""));
+        assert!(events[0].contains("\"pending_owner\":null"));
     }
 
     /// TOB-CNEAR-9: `owner_get` is the single source of truth for ownership.
