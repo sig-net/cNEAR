@@ -2,7 +2,7 @@ set dotenv-load := true
 
 # Pinned aurora-controller-factory revision.
 # This is *NOT* the audited commit on the reccomendation of the Aurora team
-controller-commit := "351dc02743894ca297e7a6f37aace470098c9630"
+controller-commit := "10f67290653be3f04538ac24deb8edf154139b5a"
 
 # Cache the controller source outside target, at the pinned commit.
 setup-controller:
@@ -33,14 +33,7 @@ build-controller: setup-controller
     esac
     export CARGO_TARGET_DIR="$TARGET_DIR"
     cd .cache/aurora-controller-factory
-    # The controller pins its own (older) toolchain and its near-sdk refuses
-    # newer compilers. With rustup, the rust-toolchain file in this directory
-    # is honoured automatically; under nix we ask for the matching devshell.
-    if command -v rustup >/dev/null 2>&1; then
-        cargo make build
-    else
-        nix develop "$ROOT_DIR#controller" --command cargo make build
-    fi
+    cargo make build
     cd "$ROOT_DIR"
     mkdir -p "$TARGET_DIR/near"
     cp .cache/aurora-controller-factory/res/aurora-controller-factory.wasm "$TARGET_DIR/near/"
