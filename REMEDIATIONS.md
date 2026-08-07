@@ -16,10 +16,10 @@ Response to the Trail of Bits assessment (2026-07-27) of cNEAR at `c1944263327d8
 | 8 | Info | Unpinned controller source | `controller_wasm_is_built_from_the_pinned_commit` |
 | 9 | Info | `owner_get` disagrees with effective ownership | `test_ownership_transfer_leaves_previous_owner_powerless`, `test_trait_owner_set_is_unsupported` |
 | 10 | Info | Freeze-list uses contract-funded storage | documentation only |
-| 11 | Low | Admin actions emit no events | 7 event tests |
+| 11 | Low | Admin actions emit no events | `test_pause_emits_event_on_every_call`, `test_pause_contract_emits_exactly_one_event`, `test_unpause_emits_event_on_every_call`, `test_freeze_unfreeze_emit_events_on_every_call`, `test_set_latest_price_emits_event_with_old_and_new_values`, `test_cancel_without_pending_transfer_emits_event`, `test_force_transfer_emits_dedicated_event` |
 | 12 | Info | Force transfers bypass pause/freeze | `test_freeze_prevents_transfers` |
 | 13 | **High** | Transfer retains previous owner's permissions | `test_previous_owner_cannot_act_after_transfer`, `test_previous_owner_cannot_reclaim_ownership` |
-| 14 | Med | Frozen accounts burn balance via `storage_unregister` | 4 unit, 2 sandbox tests |
+| 14 | Med | Frozen accounts burn balance via `storage_unregister` | `test_unregister_with_force_cannot_burn_balance`, `test_unregister_succeeds_after_emptying_balance`, `test_frozen_account_cannot_burn_balance_via_unregister`, `test_paused_account_cannot_burn_balance_via_unregister`, `close_account_force_non_empty_balance`, `transfer_call_sender_cannot_unregister_to_burn` |
 
 ## Behaviour changes
 
