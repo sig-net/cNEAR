@@ -33,7 +33,7 @@ build-controller: setup-controller
     esac
     export CARGO_TARGET_DIR="$TARGET_DIR"
     cd .cache/aurora-controller-factory
-    cargo make build
+    cargo make build-and-rename
     cd "$ROOT_DIR"
     mkdir -p "$TARGET_DIR/near"
     cp .cache/aurora-controller-factory/res/aurora-controller-factory.wasm "$TARGET_DIR/near/"
