@@ -114,7 +114,7 @@ pub enum ContractEvent {
 
 /// Adapter that lets the `#[only(owner)]` attribute guard privileged methods.
 ///
-/// This is deliberately implemented by hand rather than with `#[derive(Ownable)]`, because we don't
+/// This is deliberately implemented by hand rather than with `#[derive(Ownable)]`, because we don't expose a single step owner changing function, only propose-accept.
 impl Ownable for Contract {
     /// Unused: the owner lives in contract state, not in a bare storage slot.
     /// The trait requires this method, so return the conventional key.
