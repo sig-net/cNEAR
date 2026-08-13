@@ -20,6 +20,9 @@ setup-controller:
     # Fetch only if the pinned commit is not already present locally.
     git -C "$DIR" cat-file -e {{controller-commit}}^{commit} 2>/dev/null || git -C "$DIR" fetch origin
     git -C "$DIR" checkout --quiet --detach {{controller-commit}}
+    # Remove untracked and ignored files (stray .cargo/config.toml, previous build
+    # artifacts, etc.) so the build input is exactly the pinned tree.
+    git -C "$DIR" clean -ffdxq
 
 # Build aurora-controller using cargo make (puts wasm in res/)
 build-controller: setup-controller
