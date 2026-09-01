@@ -1,14 +1,14 @@
 pub mod common;
 
 use near_sdk::{json_types::U128, NearToken};
-use near_workspaces::{operations::Function, result::ValueOrReceiptId};
+use near_workspaces::operations::Function;
 
-use common::{init_accounts, init_contracts, register_user, ONE_YOCTO};
+use common::{init_accounts, init_contracts, register_user, ONE_YOCTO, TOTAL_SUPPLY};
 
 #[tokio::test]
 async fn simple_transfer() -> anyhow::Result<()> {
     // Create balance variables
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -44,8 +44,8 @@ async fn simple_transfer() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn transfer_call_with_burned_amount() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+async fn transfer_call_sender_cannot_unregister_to_burn() -> anyhow::Result<()> {
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -56,7 +56,10 @@ async fn transfer_call_with_burned_amount() -> anyhow::Result<()> {
     // defi contract must be registered as a FT account
     register_user(&ft_contract, defi_contract.id()).await?;
 
-    // root invests in defi by calling `ft_transfer_call`
+    // The sender tries to disappear mid-transfer so that the refund from
+    // `ft_on_transfer` is burned instead of returned. Force-unregister is
+    // refused while the account still holds a balance, so the whole batch
+    // reverts and the supply is untouched.
     let res = ft_contract
         .batch()
         .call(
@@ -78,39 +81,30 @@ async fn transfer_call_with_burned_amount() -> anyhow::Result<()> {
         )
         .transact()
         .await?;
-    assert!(res.is_success());
 
-    let logs = res.logs();
-    let expected = format!("Account @{} burned {}", ft_contract.id(), 10);
-    assert!(logs.len() >= 2);
-    assert!(logs.contains(&"The account of the sender was deleted"));
-    assert!(logs.contains(&(expected.as_str())));
+    assert!(
+        res.is_failure(),
+        "unregistering an account with a balance must fail: {:#?}",
+        res
+    );
+    assert!(format!("{:?}", res).contains("cannot unregister an account that still holds cNEAR"));
 
-    match res.receipt_outcomes()[5].clone().into_result()? {
-        ValueOrReceiptId::Value(val) => {
-            let used_amount = val.json::<U128>()?;
-            assert_eq!(used_amount, transfer_amount);
-        }
-        _ => panic!("Unexpected receipt id"),
-    }
-    assert!(res.json::<bool>()?);
-
-    let res = ft_contract.call("ft_total_supply").view().await?;
-    assert_eq!(res.json::<U128>()?.0, transfer_amount.0 - 10);
-    let defi_balance = ft_contract
-        .call("ft_balance_of")
-        .args_json((defi_contract.id(),))
+    let supply = ft_contract
+        .call("ft_total_supply")
         .view()
         .await?
         .json::<U128>()?;
-    assert_eq!(defi_balance.0, transfer_amount.0 - 10);
+    assert_eq!(
+        supply, initial_balance,
+        "the reverted batch must not burn tokens"
+    );
 
     Ok(())
 }
 
 #[tokio::test]
 async fn transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -156,7 +150,7 @@ async fn transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<(
 
 #[tokio::test]
 async fn transfer_call_when_called_contract_not_registered_with_ft() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
     let worker = near_workspaces::sandbox().await?;
@@ -200,7 +194,7 @@ async fn transfer_call_when_called_contract_not_registered_with_ft() -> anyhow::
 
 #[tokio::test]
 async fn transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let refund_amount = U128::from(NearToken::from_near(50).as_yoctonear());
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
 
@@ -249,7 +243,7 @@ async fn transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn transfer_call_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
     let transfer_amount = U128::from(NearToken::from_near(100).as_yoctonear());
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;

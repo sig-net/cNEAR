@@ -24,21 +24,23 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = pkgs.rust-bin.stable."1.86.0".default.override {
+        rustToolchain = pkgs.rust-bin.stable."1.93.0".default.override {
           targets = [ "wasm32-unknown-unknown" ];
         };
       in
       {
-        devShell = pkgs.mkShell {
-
-          buildInputs = with pkgs; [
-            rustToolchain
-            cargo-watch
-            cargo-audit
-            rust-analyzer
-            binaryen
-            llvmPackages.clang
-          ];
+        devShells = {
+          default = pkgs.mkShell {
+            buildInputs = with pkgs; [
+              rustToolchain
+              cargo-watch
+              cargo-audit
+              cargo-make
+              rust-analyzer
+              binaryen
+              llvmPackages.clang
+            ];
+          };
         };
       }
     );

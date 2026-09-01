@@ -2,11 +2,11 @@ pub mod common;
 
 use near_sdk::{json_types::U128, NearToken};
 
-use common::{init_accounts, init_contracts, ONE_YOCTO};
+use common::{init_accounts, init_contracts, ONE_YOCTO, TOTAL_SUPPLY};
 
 #[tokio::test]
 async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -34,6 +34,10 @@ async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
         .await?;
     assert!(res.is_failure());
 
+    // nearcore 2.12+ defers gas-refund receipts; let them settle before
+    // measuring balances.
+    worker.fast_forward(2).await?;
+
     let new_account_balance_diff = new_account_balance_before_deposit
         .saturating_sub(new_account.view_account().await?.balance);
     // new_account is charged the transaction fee, so it should loose some NEAR
@@ -47,14 +51,18 @@ async fn storage_deposit_not_enough_deposit() -> anyhow::Result<()> {
         .saturating_sub(contract_balance_before_deposit);
     // contract receives a gas rewards for the function call, so it should gain some NEAR
     assert!(contract_balance_diff > NearToken::from_near(0));
-    assert!(contract_balance_diff < NearToken::from_yoctonear(30_000_000_000_000_000_000));
+    assert!(
+        contract_balance_diff < NearToken::from_millinear(2),
+        "contract_balance_diff = {} yocto",
+        contract_balance_diff.as_yoctonear()
+    );
 
     Ok(())
 }
 
 #[tokio::test]
 async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -82,12 +90,19 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
+    // nearcore 2.12+ defers gas-refund receipts; let them settle before
+    // measuring balances.
+    worker.fast_forward(2).await?;
+
     let new_account_balance_diff = new_account_balance_before_deposit
         .saturating_sub(new_account.view_account().await?.balance);
     // new_account is charged the transaction fee, so it should loose a bit more than minimal_deposit
     assert!(new_account_balance_diff > minimal_deposit);
     assert!(
-        new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1))
+        new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1)),
+        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        new_account_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     let contract_balance_diff = ft_contract
@@ -99,8 +114,10 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
     assert!(contract_balance_diff > minimal_deposit);
     // adjust the upper limit of the assertion to be more flexible for small variations in the gas reward received
     assert!(
-        contract_balance_diff
-            < minimal_deposit.saturating_add(NearToken::from_yoctonear(50_000_000_000_000_000_000))
+        contract_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
+        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        contract_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     Ok(())
@@ -108,7 +125,7 @@ async fn storage_deposit_minimal_deposit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -177,6 +194,10 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
+    // nearcore 2.12+ defers gas-refund receipts; let them settle before
+    // measuring balances.
+    worker.fast_forward(2).await?;
+
     // The expected storage balance should be the minimal deposit,
     // the balance of the account should be reduced by the deposit,
     // and the contract should gain the deposit.
@@ -198,7 +219,10 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
     // new_account is charged the transaction fee, so it should loose a bit more than minimal_deposit
     assert!(new_account_balance_diff > minimal_deposit);
     assert!(
-        new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1))
+        new_account_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(1)),
+        "new_account_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        new_account_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     let contract_balance_diff = ft_contract
@@ -209,8 +233,10 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
     // contract receives a gas rewards for the function call, so the difference should be slightly more than minimal_deposit
     assert!(contract_balance_diff > minimal_deposit);
     assert!(
-        contract_balance_diff
-            < minimal_deposit.saturating_add(NearToken::from_yoctonear(50_000_000_000_000_000_000))
+        contract_balance_diff < minimal_deposit.saturating_add(NearToken::from_millinear(2)),
+        "contract_balance_diff = {} yocto, minimal_deposit = {} yocto",
+        contract_balance_diff.as_yoctonear(),
+        minimal_deposit.as_yoctonear()
     );
 
     Ok(())
@@ -218,7 +244,7 @@ async fn storage_deposit_refunds_excessive_deposit() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn close_account_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
@@ -239,45 +265,42 @@ async fn close_account_empty_balance() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn close_account_non_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
     let (alice, _, _, _) = init_accounts(&root).await?;
     let (ft_contract, _) = init_contracts(&worker, initial_balance, &alice).await?;
 
-    let res = ft_contract
-        .call("storage_unregister")
-        .args_json((Option::<bool>::None,))
-        .max_gas()
-        .deposit(ONE_YOCTO)
-        .transact()
-        .await?;
-    assert!(format!("{:?}", res)
-        .contains("Can't unregister the account with the positive balance without force"));
-
-    let res = ft_contract
-        .call("storage_unregister")
-        .args_json((Some(false),))
-        .max_gas()
-        .deposit(ONE_YOCTO)
-        .transact()
-        .await?;
-    assert!(format!("{:?}", res)
-        .contains("Can't unregister the account with the positive balance without force"));
+    // Neither the default nor an explicit `force: false` may close an account
+    // that still holds tokens.
+    for force in [Option::<bool>::None, Some(false)] {
+        let res = ft_contract
+            .call("storage_unregister")
+            .args_json((force,))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(
+            format!("{:?}", res).contains("cannot unregister an account that still holds cNEAR")
+        );
+    }
 
     Ok(())
 }
 
 #[tokio::test]
 async fn close_account_force_non_empty_balance() -> anyhow::Result<()> {
-    let initial_balance = U128::from(NearToken::from_near(10000).as_yoctonear());
+    let initial_balance = TOTAL_SUPPLY;
 
     let worker = near_workspaces::sandbox().await?;
     let root = worker.root_account()?;
     let (alice, _, _, _) = init_accounts(&root).await?;
     let (ft_contract, _) = init_contracts(&worker, initial_balance, &alice).await?;
 
+    // `force: true` must NOT destroy the balance: a frozen holder could
+    // otherwise zero out the balance the owner needs to recover.
     let res = ft_contract
         .call("storage_unregister")
         .args_json((Some(true),))
@@ -285,10 +308,19 @@ async fn close_account_force_non_empty_balance() -> anyhow::Result<()> {
         .deposit(ONE_YOCTO)
         .transact()
         .await?;
-    assert!(res.is_success());
+    assert!(
+        res.is_failure(),
+        "force-unregister must not burn a balance: {:#?}",
+        res
+    );
+    assert!(format!("{:?}", res).contains("cannot unregister an account that still holds cNEAR"));
 
     let res = ft_contract.call("ft_total_supply").view().await?;
-    assert_eq!(res.json::<U128>()?.0, 0);
+    assert_eq!(
+        res.json::<U128>()?,
+        initial_balance,
+        "the balance must not have been burned"
+    );
 
     Ok(())
 }

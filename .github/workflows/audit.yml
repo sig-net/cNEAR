@@ -1,0 +1,31 @@
+name: Security audit
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+  # New advisories appear without code changes; scan the lockfile daily and
+  # open a GitHub issue when a scheduled run finds a new vulnerability.
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      # Pre-install a prebuilt cargo-audit binary; without this, audit-check
+      # compiles cargo-audit from source with the repo's pinned toolchain,
+      # which breaks whenever cargo-audit's MSRV moves past the pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -5,13 +5,19 @@ NOTES:
   - JSON calls should pass U128 as a base-10 string. E.g. "100".
   - The contract optimizes the inner trie structure by hashing account IDs. It will prevent some
     abuse of deep tries. Shouldn't be an issue, once NEAR clients implement full hashing of keys.
-  - The contract tracks the change in storage before and after the call. If the storage increases,
+  - For the standard NEP-141 storage-management methods, the contract tracks the change in storage
+    before and after the call. If the storage increases,
     the contract requires the caller of the contract to attach enough deposit to the function call
     to cover the storage cost.
     This is done to prevent a denial of service attack on the contract by taking all available storage.
     If the storage decreases, the contract will issue a refund for the cost of the released storage.
     The unused tokens from the attached deposit are also refunded, so it's safe to
     attach more deposit than required.
+  - The cNEAR-specific freeze list is the exception: `freeze_account` is not payable and its storage
+    is funded from the contract account's own balance, not by the caller. `unfreeze_account` releases
+    that stake back to the contract and refunds nobody. The freeze list is therefore bounded by the
+    contract's available NEAR balance: if it runs out, further freezes fail until the account is
+    topped up. Deploy with a reserve and monitor it — see "Errata" in README.md for the numbers.
   - To prevent the deployed contract from being modified or deleted, it should not have any access
     keys on its account.
 */
@@ -24,7 +30,7 @@ use near_contract_standards::fungible_token::{
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
-use near_plugins::{access_control, access_control_any, AccessControlRole, AccessControllable};
+use near_plugins::{only, Ownable};
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::U128;
@@ -34,14 +40,7 @@ use near_sdk::{
     PanicOnDefault, Promise, PromiseOrValue,
 };
 
-#[derive(AccessControlRole, Clone, Copy)]
-#[near(serializers = [json])]
-enum Role {
-    Owner,
-}
-
 #[derive(PanicOnDefault)]
-#[access_control(role_type(Role))]
 #[near(contract_state)]
 pub struct Contract {
     token: FungibleToken,
@@ -49,6 +48,9 @@ pub struct Contract {
     frozen_accounts: LookupSet<AccountId>,
     paused: bool,
     owner_id: AccountId,
+    /// Proposed next owner, set by `owner_set` and cleared once accepted or
+    /// cancelled. Mirrors OpenZeppelin `Ownable2Step._pendingOwner`.
+    pending_owner: Option<AccountId>,
     latest_price: u128,
 }
 
@@ -58,6 +60,83 @@ enum StorageKey {
     FungibleToken,
     Metadata,
     FrozenAccounts,
+}
+
+/// NEP-297 events for the cNEAR-specific administrative operations, so that off-chain monitoring can consume from an event interface instead of parsing transactions or polling state.
+///
+/// Every successful invocation of a privileged method emits its event, even when the call did not change state (e.g. pausing an already-paused contract).
+#[near(event_json(standard = "cnear"))]
+pub enum ContractEvent {
+    #[event_version("1.0.0")]
+    Paused { by: AccountId },
+    #[event_version("1.0.0")]
+    Unpaused { by: AccountId },
+    #[event_version("1.0.0")]
+    AccountFrozen {
+        by: AccountId,
+        account_id: AccountId,
+    },
+    #[event_version("1.0.0")]
+    AccountUnfrozen {
+        by: AccountId,
+        account_id: AccountId,
+    },
+    #[event_version("1.0.0")]
+    PriceUpdated {
+        by: AccountId,
+        old_price: U128,
+        new_price: U128,
+    },
+    #[event_version("1.0.0")]
+    OwnershipTransferStarted {
+        previous_owner: AccountId,
+        new_owner: AccountId,
+    },
+    #[event_version("1.0.0")]
+    OwnershipTransferCancelled {
+        by: AccountId,
+        pending_owner: Option<AccountId>,
+    },
+    #[event_version("1.0.0")]
+    OwnerChanged {
+        old_owner: AccountId,
+        new_owner: AccountId,
+    },
+    #[event_version("1.0.0")]
+    ForceFtTransfer {
+        by: AccountId,
+        sender_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    },
+}
+
+/// Adapter that lets the `#[only(owner)]` attribute guard privileged methods.
+///
+/// This is deliberately implemented by hand rather than with `#[derive(Ownable)]`, because we don't expose a single step owner changing function, only propose-accept.
+impl Ownable for Contract {
+    /// Unused: the owner lives in contract state, not in a bare storage slot.
+    /// The trait requires this method, so return the conventional key.
+    fn owner_storage_key(&self) -> &'static [u8] {
+        b"__OWNER__"
+    }
+
+    fn owner_get(&self) -> Option<AccountId> {
+        Some(self.owner_id.clone())
+    }
+
+    /// Unsupported and unreachable as cNEAR has no single-step transfer. It only to satisfy the trait.
+    fn owner_set(&mut self, _owner: Option<AccountId>) {
+        env::panic_str(
+            "cNEAR has no single-step ownership transfer: use owner_set(new_owner) \
+             followed by owner_accept() from the proposed account",
+        );
+    }
+
+    fn owner_is(&self) -> bool {
+        env::predecessor_account_id() == self.owner_id
+    }
 }
 
 #[near]
@@ -78,11 +157,9 @@ impl Contract {
             frozen_accounts: LookupSet::new(StorageKey::FrozenAccounts),
             paused: false,
             owner_id: owner_id.clone(),
+            pending_owner: None,
             latest_price: latest_price.into(),
         };
-
-        // Grant Owner role to owner_id
-        this.grant_owner_role(&owner_id);
 
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
@@ -97,50 +174,100 @@ impl Contract {
         this
     }
 
-    #[access_control_any(roles(Role::Owner))]
-    pub fn pause(&mut self) {
-        self.paused = true;
-    }
-
-    /// Alias for pause() - matches Aurora Controller expected method name
-    #[access_control_any(roles(Role::Owner))]
+    /// Pause all *non-owner* token transfers (`ft_transfer`, `ft_transfer_call`). Pausing does not restrict owner-only methods such as [`Self::force_ft_transfer`] since the owner can always unpause.
+    /// Emits a `Paused` event on every successful call, even if already paused.
+    #[only(owner)]
     pub fn pause_contract(&mut self) {
-        self.pause();
+        self.paused = true;
+        ContractEvent::Paused {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
     }
 
-    #[access_control_any(roles(Role::Owner))]
+    /// Emits an `Unpaused` event on every successful call, even if not paused.
+    #[only(owner)]
     pub fn unpause(&mut self) {
         self.paused = false;
+        ContractEvent::Unpaused {
+            by: env::predecessor_account_id(),
+        }
+        .emit();
     }
 
     pub fn is_paused(&self) -> bool {
         self.paused
     }
 
-    /// Upgrade contract code - owner only
-    #[access_control_any(roles(Role::Owner))]
-    pub fn upgrade(&self) -> Promise {
-        let code = env::input().expect("no code provided").to_vec();
+    /// Upgrade contract code - owner only.
+    ///
+    /// The arguments are Borsh-encoded, matching the interface the Aurora
+    /// controller calls (`code`, `state_migration_gas`).
+    #[payable]
+    #[only(owner)]
+    pub fn upgrade(
+        &mut self,
+        #[serializer(borsh)] code: Vec<u8>,
+        #[serializer(borsh)] state_migration_gas: Option<u64>,
+    ) -> Promise {
+        // The controller attaches 1 yoctoNEAR; requiring it keeps function-call
+        // access keys (which cannot attach a deposit) away from this method.
+        assert_one_yocto();
+        require!(
+            state_migration_gas.is_none(),
+            "state migration is not supported: state_migration_gas must be null"
+        );
+        // Reject anything that is not a WASM module, so a malformed upgrade
+        // fails here instead of installing code the runtime cannot compile.
+        require!(
+            code.starts_with(b"\0asm"),
+            "code is not a WASM module (expected the \\0asm magic bytes)"
+        );
         Promise::new(env::current_account_id()).deploy_contract(code)
     }
 
-    #[access_control_any(roles(Role::Owner))]
+    /// Freeze an account, blocking it from *non-owner* transfer methods. Like [`Self::pause`], the owner can still move the frozen account's funds via [`Self::force_ft_transfer`]
+    /// Emits an `AccountFrozen` event on every successful call, even if already frozen.
+    ///
+    /// Each newly frozen account locks ~0.0005–0.0011 NEAR of the *contract's* balance for
+    /// storage (the caller pays nothing). Freezes fail once that balance is exhausted, so keep
+    /// the contract funded — see "Errata" in README.md.
+    #[only(owner)]
     pub fn freeze_account(&mut self, account_id: AccountId) {
-        self.frozen_accounts.insert(account_id);
+        self.frozen_accounts.insert(account_id.clone());
+        ContractEvent::AccountFrozen {
+            by: env::predecessor_account_id(),
+            account_id,
+        }
+        .emit();
     }
 
-    #[access_control_any(roles(Role::Owner))]
+    /// Emits an `AccountUnfrozen` event on every successful call, even if not frozen.
+    #[only(owner)]
     pub fn unfreeze_account(&mut self, account_id: AccountId) {
         self.frozen_accounts.remove(&account_id);
+        ContractEvent::AccountUnfrozen {
+            by: env::predecessor_account_id(),
+            account_id,
+        }
+        .emit();
     }
 
     pub fn is_frozen(&self, account_id: AccountId) -> bool {
         self.frozen_accounts.contains(&account_id)
     }
 
-    #[access_control_any(roles(Role::Owner))]
+    /// Emits a `PriceUpdated` event on every publication, including the previous and new values
+    #[only(owner)]
     pub fn set_latest_price(&mut self, price: U128) {
+        let old_price = U128(self.latest_price);
         self.latest_price = price.into();
+        ContractEvent::PriceUpdated {
+            by: env::predecessor_account_id(),
+            old_price,
+            new_price: price,
+        }
+        .emit();
     }
 
     /// Returns the price of 1 cNEAR in yoctoNEAR (so 10^24 means 1 NEAR = 1 cNEAR), matching LiNEAR's `ft_price` interface. The value is set by the owner and reflects the rate at the most recent of:
@@ -157,24 +284,74 @@ impl Contract {
         self.owner_id.clone()
     }
 
-    #[access_control_any(roles(Role::Owner))]
+    /// The account proposed as the next owner, if a transfer is pending.
+    ///
+    /// Mirrors OpenZeppelin `Ownable2Step.pendingOwner()`.
+    pub fn pending_owner_get(&self) -> Option<AccountId> {
+        self.pending_owner.clone()
+    }
+
+    /// Start an ownership transfer to `new_owner`, replacing any pending
+    /// transfer. Ownership does **not** move until `new_owner` itself calls
+    /// [`Self::owner_accept`].
+    ///
+    /// Mirrors OpenZeppelin `Ownable2Step.transferOwnership()`. Emits an
+    /// `OwnershipTransferStarted` event; `OwnerChanged` follows on acceptance.
+    #[only(owner)]
     pub fn owner_set(&mut self, new_owner: AccountId) {
-        let old_owner = self.owner_id.clone();
-        self.owner_id = new_owner.clone();
-        // Transfer role to new owner
-        self.acl_revoke_role(Role::Owner.into(), old_owner);
-        self.grant_owner_role(&new_owner);
+        self.pending_owner = Some(new_owner.clone());
+        ContractEvent::OwnershipTransferStarted {
+            previous_owner: self.owner_id.clone(),
+            new_owner,
+        }
+        .emit();
     }
 
-    fn grant_owner_role(&mut self, owner: &AccountId) {
-        let mut acl = self.acl_get_or_init();
-        acl.add_super_admin_unchecked(owner);
-        acl.add_admin_unchecked(Role::Owner, owner);
-        acl.grant_role_unchecked(Role::Owner, owner);
+    /// Accept a pending ownership transfer. Callable only by the account named
+    /// in [`Self::pending_owner_get`].
+    ///
+    /// Mirrors OpenZeppelin `Ownable2Step.acceptOwnership()`.
+    pub fn owner_accept(&mut self) {
+        let sender = env::predecessor_account_id();
+        require!(
+            self.pending_owner.as_ref() == Some(&sender),
+            "Ownable2Step: caller is not the pending owner"
+        );
+        self.transfer_ownership(sender);
     }
 
+    /// Cancel a pending ownership transfer.
+    ///
+    /// Emits an `OwnershipTransferCancelled` event on every successful call,
+    /// even if no transfer was pending.
+    #[only(owner)]
+    pub fn owner_cancel_transfer(&mut self) {
+        let pending_owner = self.pending_owner.take();
+        ContractEvent::OwnershipTransferCancelled {
+            by: self.owner_id.clone(),
+            pending_owner,
+        }
+        .emit();
+    }
+
+    /// Move ownership and clear any pending transfer. The new owner replaces
+    /// the old one outright: no roles or admin permissions are left behind.
+    ///
+    /// Mirrors OpenZeppelin `Ownable2Step._transferOwnership()`.
+    fn transfer_ownership(&mut self, new_owner: AccountId) {
+        self.pending_owner = None;
+        let old_owner = std::mem::replace(&mut self.owner_id, new_owner.clone());
+        ContractEvent::OwnerChanged {
+            old_owner,
+            new_owner,
+        }
+        .emit();
+    }
+
+    /// Owner-only transfer between arbitrary accounts. Not subject to the pause and freeze controls.
+    /// Emits a `ForceFtTransfer` event in addition to the standard `FtTransfer` event, so indexers can distinguish forced movements.
     #[payable]
-    #[access_control_any(roles(Role::Owner))]
+    #[only(owner)]
     pub fn force_ft_transfer(
         &mut self,
         sender_id: AccountId,
@@ -183,9 +360,17 @@ impl Contract {
         memo: Option<String>,
     ) {
         assert_one_yocto();
-        let amount: u128 = amount.into();
+        let amount_raw: u128 = amount.into();
         self.token
-            .internal_transfer(&sender_id, &receiver_id, amount, memo);
+            .internal_transfer(&sender_id, &receiver_id, amount_raw, memo.clone());
+        ContractEvent::ForceFtTransfer {
+            by: env::predecessor_account_id(),
+            sender_id,
+            receiver_id,
+            amount,
+            memo,
+        }
+        .emit();
     }
 }
 
@@ -271,8 +456,15 @@ impl StorageManagement for Contract {
         self.token.storage_withdraw(amount)
     }
 
+    /// Unregister the caller and release their storage deposit.
+    ///
+    /// Unlike the NEP-145 reference behaviour, `force` does **not** let a caller destroy their balance. This is because we don't want people to be able to zero out frozen accounts.
     #[payable]
     fn storage_unregister(&mut self, force: Option<bool>) -> bool {
+        require!(
+            self.token.ft_balance_of(env::predecessor_account_id()).0 == 0,
+            "cannot unregister an account that still holds cNEAR: transfer the balance out first"
+        );
         #[allow(unused_variables)]
         if let Some((account_id, balance)) = self.token.internal_storage_unregister(force) {
             log!("Closed @{} with {}", account_id, balance);
@@ -307,8 +499,13 @@ mod tests {
 
     use super::*;
 
-    const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000;
-    const INITIAL_PRICE: u128 = 1612;
+    const ONE_NEAR: u128 = NearToken::from_near(1).as_yoctonear();
+
+    // Production values - keep in sync with the deployment defaults.
+    // 100 trillion tokens at 24 decimals.
+    const TOTAL_SUPPLY: Balance = 100_000_000_000_000 * ONE_NEAR;
+    // 1 NEAR per token, in yoctoNEAR.
+    const INITIAL_PRICE: u128 = ONE_NEAR;
 
     fn current() -> AccountId {
         accounts(0)
@@ -548,8 +745,9 @@ mod tests {
         contract.storage_unregister(None);
     }
 
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
     #[test]
-    fn test_unregister_with_force() {
+    fn test_unregister_with_force_cannot_burn_balance() {
         let (mut contract, mut context) = setup();
 
         testing_env!(context
@@ -574,13 +772,82 @@ mod tests {
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
 
-        // force to unregister no matter what
-        // this reduces total supply because user's tokens are burnt
+        // `force` must NOT destroy a positive balance: otherwise a frozen
+        // holder could zero out the balance the owner needs to recover.
+        contract.storage_unregister(Some(true));
+    }
+
+    #[test]
+    fn test_unregister_succeeds_after_emptying_balance() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        let transfer_amount = TOTAL_SUPPLY / 10;
+        contract.ft_transfer(user1(), transfer_amount.into(), None);
+
+        // Send it back, then close the account: the documented exit path.
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.ft_transfer(owner(), transfer_amount.into(), None);
         assert!(contract.storage_unregister(Some(true)));
 
         assert!(contract.storage_balance_of(user1()).is_none());
-        assert_eq!(contract.ft_balance_of(user1()).0, 0);
-        assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY - transfer_amount);
+        assert_eq!(
+            contract.ft_total_supply().0,
+            TOTAL_SUPPLY,
+            "unregistering must not destroy tokens"
+        );
+    }
+
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
+    #[test]
+    fn test_frozen_account_cannot_burn_balance_via_unregister() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+
+        // The freeze exists to preserve this balance for owner recovery.
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.storage_unregister(Some(true));
+    }
+
+    #[should_panic(expected = "cannot unregister an account that still holds cNEAR")]
+    #[test]
+    fn test_paused_account_cannot_burn_balance_via_unregister() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.pause_contract();
+
+        testing_env!(context
+            .predecessor_account_id(user1())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.storage_unregister(Some(true));
     }
 
     #[test]
@@ -814,7 +1081,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
 
         assert_eq!(
             contract.ft_balance_of(owner()).0,
@@ -842,7 +1109,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(owner(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(owner(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -863,7 +1130,7 @@ mod tests {
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
 
-        contract.ft_transfer_call(user1(), 0.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), 0.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -885,7 +1152,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -899,7 +1166,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -913,7 +1180,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY / 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     #[should_panic]
@@ -935,7 +1202,7 @@ mod tests {
             .build());
 
         let transfer_amount = TOTAL_SUPPLY + 10;
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
     #[should_panic]
     #[test]
@@ -957,7 +1224,7 @@ mod tests {
             .build());
         let transfer_amount = TOTAL_SUPPLY / 10;
 
-        contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
+        let _ = contract.ft_transfer_call(user1(), transfer_amount.into(), None, "".to_string());
     }
 
     fn register_user(
@@ -1114,7 +1381,7 @@ mod tests {
         let (mut contract, mut context) = setup();
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
 
         assert!(contract.is_paused());
     }
@@ -1124,7 +1391,7 @@ mod tests {
         let (mut contract, mut context) = setup();
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
         assert!(contract.is_paused());
 
         contract.unpause();
@@ -1145,7 +1412,7 @@ mod tests {
         contract.ft_transfer(user1(), transfer_amount.into(), None);
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
 
         testing_env!(context
             .predecessor_account_id(owner())
@@ -1161,13 +1428,14 @@ mod tests {
         register_user(&mut contract, &mut context, user1());
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
 
         testing_env!(context
             .predecessor_account_id(owner())
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
+        let _ =
+            contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
     }
 
     #[test]
@@ -1187,10 +1455,10 @@ mod tests {
         let (mut contract, mut context) = setup();
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
         assert!(contract.is_paused());
 
-        contract.pause();
+        contract.pause_contract();
         assert!(contract.is_paused());
     }
 
@@ -1226,7 +1494,7 @@ mod tests {
         register_user(&mut contract, &mut context, user1());
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
         contract.freeze_account(user1());
 
         testing_env!(context
@@ -1243,7 +1511,7 @@ mod tests {
         register_user(&mut contract, &mut context, user1());
 
         testing_env!(context.predecessor_account_id(owner()).build());
-        contract.pause();
+        contract.pause_contract();
         contract.unpause();
 
         testing_env!(context
@@ -1294,6 +1562,301 @@ mod tests {
             .predecessor_account_id(owner())
             .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
+        let _ =
+            contract.ft_transfer_call(user1(), (TOTAL_SUPPLY / 10).into(), None, "".to_string());
+    }
+
+    fn cnear_events() -> Vec<String> {
+        near_sdk::test_utils::get_logs()
+            .into_iter()
+            .filter(|log| log.starts_with("EVENT_JSON:") && log.contains("\"standard\":\"cnear\""))
+            .collect()
+    }
+
+    #[test]
+    fn test_pause_emits_event_on_every_call() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.pause_contract();
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"paused\""));
+        assert!(events[0].contains(&format!("\"by\":\"{}\"", owner())));
+
+        // Privileged actions are audited unconditionally: re-pausing an
+        // already-paused contract still emits an event.
+        contract.pause_contract();
+        assert_eq!(cnear_events().len(), 2);
+    }
+
+    #[test]
+    fn test_pause_contract_emits_exactly_one_event() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.pause_contract();
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"paused\""));
+    }
+
+    #[test]
+    fn test_unpause_emits_event_on_every_call() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        // Unpausing an unpaused contract is a state no-op but is still audited.
+        contract.unpause();
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"unpaused\""));
+
+        contract.pause_contract();
+        contract.unpause();
+        let events = cnear_events();
+        assert_eq!(events.len(), 3);
+        assert!(events[1].contains("\"event\":\"paused\""));
+        assert!(events[2].contains("\"event\":\"unpaused\""));
+    }
+
+    #[test]
+    fn test_freeze_unfreeze_emit_events_on_every_call() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.freeze_account(user1());
+        contract.freeze_account(user1()); // state no-op, still audited
+        contract.unfreeze_account(user1());
+        contract.unfreeze_account(user1()); // state no-op, still audited
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 4);
+        assert!(events[0].contains("\"event\":\"account_frozen\""));
+        assert!(events[0].contains(&format!("\"account_id\":\"{}\"", user1())));
+        assert!(events[1].contains("\"event\":\"account_frozen\""));
+        assert!(events[2].contains("\"event\":\"account_unfrozen\""));
+        assert!(events[3].contains("\"event\":\"account_unfrozen\""));
+    }
+
+    #[test]
+    fn test_set_latest_price_emits_event_with_old_and_new_values() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.set_latest_price(1_000_000.into());
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"price_updated\""));
+        assert!(events[0].contains(&format!("\"old_price\":\"{INITIAL_PRICE}\"")));
+        assert!(events[0].contains("\"new_price\":\"1000000\""));
+    }
+
+    /// Transfer ownership the way a real operator would: propose, then accept.
+    fn transfer_ownership_to(
+        contract: &mut Contract,
+        context: &mut VMContextBuilder,
+        from: AccountId,
+        to: AccountId,
+    ) {
+        testing_env!(context.predecessor_account_id(from).build());
+        contract.owner_set(to.clone());
+        testing_env!(context.predecessor_account_id(to).build());
+        contract.owner_accept();
+    }
+
+    #[test]
+    fn test_owner_set_only_proposes() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_set(user1());
+
+        // Ownership has NOT moved yet.
+        assert_eq!(contract.owner_get(), owner());
+        assert_eq!(contract.pending_owner_get(), Some(user1()));
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"ownership_transfer_started\""));
+        assert!(events[0].contains(&format!("\"previous_owner\":\"{}\"", owner())));
+        assert!(events[0].contains(&format!("\"new_owner\":\"{}\"", user1())));
+    }
+
+    #[test]
+    fn test_owner_accept_completes_transfer() {
+        let (mut contract, mut context) = setup();
+        transfer_ownership_to(&mut contract, &mut context, owner(), user1());
+
+        assert_eq!(contract.owner_get(), user1());
+        assert_eq!(contract.pending_owner_get(), None);
+
+        // `testing_env!` clears logs per context, so only the acceptance
+        // phase's event is visible here; the proposal event is asserted in
+        // `test_owner_set_only_proposes`.
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"owner_changed\""));
+        assert!(events[0].contains(&format!("\"old_owner\":\"{}\"", owner())));
+        assert!(events[0].contains(&format!("\"new_owner\":\"{}\"", user1())));
+    }
+
+    #[should_panic(expected = "Ownable2Step: caller is not the pending owner")]
+    #[test]
+    fn test_only_pending_owner_can_accept() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_set(user1());
+
+        // user2 was not proposed, so it cannot take ownership.
+        testing_env!(context.predecessor_account_id(user2()).build());
+        contract.owner_accept();
+    }
+
+    #[should_panic(expected = "Ownable2Step: caller is not the pending owner")]
+    #[test]
+    fn test_cannot_accept_without_a_pending_transfer() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(user1()).build());
+        contract.owner_accept();
+    }
+
+    #[test]
+    fn test_owner_set_replaces_a_pending_transfer() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_set(user1());
+        contract.owner_set(user2());
+        assert_eq!(contract.pending_owner_get(), Some(user2()));
+
+        // The superseded proposal is no longer acceptable.
+        testing_env!(context.predecessor_account_id(user2()).build());
+        contract.owner_accept();
+        assert_eq!(contract.owner_get(), user2());
+    }
+
+    #[test]
+    fn test_cancel_pending_transfer() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_set(user1());
+        contract.owner_cancel_transfer();
+
+        assert_eq!(contract.pending_owner_get(), None);
+        assert_eq!(contract.owner_get(), owner());
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 2);
+        assert!(events[1].contains("\"event\":\"ownership_transfer_cancelled\""));
+        assert!(events[1].contains(&format!("\"by\":\"{}\"", owner())));
+        assert!(events[1].contains(&format!("\"pending_owner\":\"{}\"", user1())));
+    }
+
+    // Privileged actions are audited unconditionally: cancelling when no
+    // transfer is pending still emits the event.
+    #[test]
+    fn test_cancel_without_pending_transfer_emits_event() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_cancel_transfer();
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"ownership_transfer_cancelled\""));
+        assert!(events[0].contains("\"pending_owner\":null"));
+    }
+
+    /// TOB-CNEAR-9: `owner_get` is the single source of truth for ownership.
+    /// TOB-CNEAR-13: a previous owner keeps no authority after a transfer.
+    #[test]
+    fn test_ownership_transfer_leaves_previous_owner_powerless() {
+        let (mut contract, mut context) = setup();
+
+        transfer_ownership_to(&mut contract, &mut context, owner(), user1());
+
+        // The reported owner is the only owner.
+        assert_eq!(contract.owner_get(), user1());
+
+        // The new owner can exercise ownership...
+        testing_env!(context.predecessor_account_id(user1()).build());
+        contract.pause_contract();
+        assert!(contract.is_paused());
+
+        // ...and the old owner can no longer act, nor take ownership back.
+        testing_env!(context.predecessor_account_id(owner()).build());
+        assert!(!contract.owner_is(), "the previous owner must not be owner");
+    }
+
+    #[should_panic(expected = "Ownable: Method must be called from owner")]
+    #[test]
+    fn test_previous_owner_cannot_act_after_transfer() {
+        let (mut contract, mut context) = setup();
+
+        transfer_ownership_to(&mut contract, &mut context, owner(), user1());
+
+        // The previous owner has no role, admin or super-admin left to fall
+        // back on: the attempt simply fails.
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.pause_contract();
+    }
+
+    #[should_panic(expected = "Ownable: Method must be called from owner")]
+    #[test]
+    fn test_previous_owner_cannot_reclaim_ownership() {
+        let (mut contract, mut context) = setup();
+
+        transfer_ownership_to(&mut contract, &mut context, owner(), user1());
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        contract.owner_set(owner());
+    }
+
+    /// The `Ownable` trait's single-step setter is refused outright, so
+    /// `transfer_ownership` stays the only writer of `owner_id` and there is no
+    /// way to clear the owner or to skip the propose/accept flow.
+    #[should_panic(expected = "cNEAR has no single-step ownership transfer")]
+    #[test]
+    fn test_trait_owner_set_is_unsupported() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        Ownable::owner_set(&mut contract, Some(user1()));
+    }
+
+    #[should_panic(expected = "cNEAR has no single-step ownership transfer")]
+    #[test]
+    fn test_owner_cannot_be_cleared() {
+        let (mut contract, mut context) = setup();
+
+        testing_env!(context.predecessor_account_id(owner()).build());
+        Ownable::owner_set(&mut contract, None);
+    }
+
+    #[test]
+    fn test_force_transfer_emits_dedicated_event() {
+        let (mut contract, mut context) = setup();
+        register_user(&mut contract, &mut context, user1());
+
+        testing_env!(context
+            .predecessor_account_id(owner())
+            .attached_deposit(NearToken::from_yoctonear(1))
+            .build());
+        contract.force_ft_transfer(owner(), user1(), (TOTAL_SUPPLY / 10).into(), None);
+
+        let events = cnear_events();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"event\":\"force_ft_transfer\""));
+        assert!(events[0].contains(&format!("\"sender_id\":\"{}\"", owner())));
+        assert!(events[0].contains(&format!("\"receiver_id\":\"{}\"", user1())));
+        // The standard NEP-141 FtTransfer event must also still be emitted.
+        assert!(near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|log| log.contains("\"standard\":\"nep141\"") && log.contains("ft_transfer")));
     }
 }
