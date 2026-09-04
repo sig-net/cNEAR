@@ -43,7 +43,7 @@ build-controller: setup-controller
 
 # Build token contract with wasm-opt
 build-token:
-    cargo near build non-reproducible-wasm
+    cargo near build non-reproducible-wasm --locked
 
 # Build both token and controller
 build: build-token build-controller
@@ -101,7 +101,7 @@ deploy *ARGS:
 
     # Dry runs are deliberately offline and do not build or contact a network.
     if [[ "$ARGS_STR" == *"--dry-run"* ]]; then
-        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
+        cargo run --quiet --locked --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
         exit $?
     fi
 
@@ -118,9 +118,9 @@ deploy *ARGS:
         # Test mode: auto-select testnet, only prompt for signer.
         REMAINING_ARGS="${ARGS_STR#test}"
         REMAINING_ARGS="${REMAINING_ARGS# }"
-        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy testnet $REMAINING_ARGS --test-mode
+        cargo run --quiet --locked --manifest-path deploy-cli/Cargo.toml -- deploy testnet $REMAINING_ARGS --test-mode
     else
-        cargo run --quiet --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
+        cargo run --quiet --locked --manifest-path deploy-cli/Cargo.toml -- deploy $ARGS_STR
     fi
 
 # Help
