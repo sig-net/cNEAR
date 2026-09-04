@@ -2,16 +2,16 @@
 #
 # Policy: every ignore entry must state (1) why it is not exploitable here,
 # (2) what unblocks the fix, and (3) the condition for removing the entry.
-
 [advisories]
 ignore = [
-    # RUSTSEC-2026-0222: wasmtime 45.0.3 — "Stores can mix up type indices between engines".
+    # All three come from near-vm-runner, which near-sdk pulls in only under its `unit-testing` feature (enabled here by the dev-dependency) and only for cfg(not(target_arch = "wasm32")). Never end up in the contract.
     #
-    # We only use wasmtime in production for types, and run the VM in unit tests. This smart contract will be run on NEAR not on our version of WASM time.
+    #     cargo tree --target wasm32-unknown-unknown -e normal -i wasmtime
+    #     cargo tree --target wasm32-unknown-unknown -e normal -i lru
     "RUSTSEC-2026-0222",
+    "RUSTSEC-2026-0269",
+    "RUSTSEC-2026-0253",
 
-    # RUSTSEC-2022-0054: wee_alloc 0.4.5 — unmaintained.
-    #
     # This is the allocator near-sdk ships by default, so it's what the contract uses on chain. Contract calls are one-shot and memory is thrown away after each call, so wee_alloc's leaks never accumulate.
     "RUSTSEC-2022-0054",
 ]
