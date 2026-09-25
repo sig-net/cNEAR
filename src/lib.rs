@@ -276,7 +276,7 @@ impl Contract {
     /// - the monthly published redemption price derived from fund NAV.
     ///
     /// This is an indicative reference price, NOT a redemption quote. The only reliable redemption price is an actual quote (e.g. via NEAR Intents), and realized rates can differ substantially — especially during periods of heavy redemptions, when public floor prices may be withdrawn entirely. Do not use this as a price oracle: computing LTV from this value in a pool that lends NEAR against cNEAR risks user funds.
-    pub fn get_latest_price(&self) -> U128 {
+    pub fn ft_price(&self) -> U128 {
         self.latest_price.into()
     }
 
@@ -1527,7 +1527,7 @@ mod tests {
     #[test]
     fn test_latest_price_set_initially() {
         let (contract, _) = setup();
-        assert_eq!(contract.get_latest_price().0, INITIAL_PRICE);
+        assert_eq!(contract.ft_price().0, INITIAL_PRICE);
     }
 
     #[test]
@@ -1537,7 +1537,7 @@ mod tests {
         testing_env!(context.predecessor_account_id(owner()).build());
         contract.set_latest_price(1_000_000.into());
 
-        assert_eq!(contract.get_latest_price().0, 1_000_000);
+        assert_eq!(contract.ft_price().0, 1_000_000);
     }
 
     #[should_panic]
