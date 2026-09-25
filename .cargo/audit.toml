@@ -14,4 +14,11 @@ ignore = [
 
     # This is the allocator near-sdk ships by default, so it's what the contract uses on chain. Contract calls are one-shot and memory is thrown away after each call, so wee_alloc's leaks never accumulate.
     "RUSTSEC-2022-0054",
+
+    # rustls (TLS 1.3 handshake messages accepted across encryption levels) only enters via near-workspaces: the integration-test harness (dev-dependency) and deploy-cli. It never ends up in the contract:
+    #
+    #     cargo tree --target wasm32-unknown-unknown -e normal -i rustls -p fungible-token
+    #
+    # Where it is linked, we only ever initiate TLS to RPC endpoints we choose, and the advisory itself notes the handshake transcript stays authenticated, so a network attacker cannot alter or complete a handshake. The fix (rustls >= 0.23.45) is blocked because it requires aws-lc-rs ^1.18 while near-crypto (0.37.4, and still 0.38.0-rc.2) pins aws-lc-rs = 1.16.2. Remove once near-crypto relaxes that pin and `cargo update -p rustls` resolves to >= 0.23.45.
+    "RUSTSEC-2026-0285",
 ]

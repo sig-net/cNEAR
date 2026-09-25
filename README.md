@@ -137,7 +137,7 @@ near call <contract-account-id> storage_deposit '' --accountId <account-id> --am
 near view <contract-account-id> ft_balance_of '{"account_id": "<account-id>"}'
 
 # View latest price
-near view <contract-account-id> get_latest_price
+near view <contract-account-id> ft_price
 
 # Transfer tokens
 near call <contract-account-id> ft_transfer '{"receiver_id": "<account-id>", "amount": "19"}' --accountId <contract-account-id> --amount 0.000000000000000000000001
